@@ -8,7 +8,7 @@ import { obfuscateWorkerCode } from "./obfuscate.js";
 const CF_API = "https://api.cloudflare.com/client/v4";
 // Compiled from official main branch source (npm run build), hosted on this fork's wizard branch
 const WORKER_JS_URL =
-  "https://raw.githubusercontent.com/MHDLabs/BPB-Worker-Panel/wizard/wizard/panel-worker.base.js";
+  "https://raw.githubusercontent.com/MHDLabs/BPB-Worker-Panel/e73373a62f7ad9532d347dc19ffefd4621c21c8c/wizard/panel-worker.base.js";
 const TWP_MIGRATION_TAG = "v1-twp";
 
 export async function verifyToken(token) {
@@ -91,22 +91,26 @@ async function getWorkersSubdomain(token, accountId) {
   throw new Error("workers.dev subdomain اکانت پیدا نشد. یک‌بار از داشبورد Workers یک Worker بسازید تا subdomain فعال شود.");
 }
 
+
 async function createKVNamespace(token, accountId, title) {
-  const res = await fetch(`${CF_API}/accounts/${accountId}/storage/kv/namespaces`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ title }),
-  });
-  const data = await res.json();
-  if (!data.success || !data.result?.id) {
-    throw new Error(
-      "ساخت KV ناموفق: " + (data.errors?.[0]?.message || JSON.stringify(data.errors || data))
-    );
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const uniqueTitle = `${title}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const res = await fetch(`${CF_API}/accounts/${accountId}/storage/kv/namespaces`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ title: uniqueTitle }),
+    });
+    const data = await res.json();
+    if (data.success && data.result?.id) return data.result.id;
+    const msg = data.errors?.[0]?.message || "";
+    if (!/already exists/i.test(msg)) {
+      throw new Error("ساخت KV ناموفق: " + (msg || JSON.stringify(data.errors || data)));
+    }
   }
-  return data.result.id;
+  throw new Error("ساخت KV ناموفق: بعد از چند تلاش نام تکراری ماند");
 }
 
 async function getWorkerMigrationTag(token, accountId, scriptName) {
