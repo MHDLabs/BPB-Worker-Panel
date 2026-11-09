@@ -1,17 +1,14 @@
 /**
- * Cloudflare API helpers for deploying BPB Worker Panel.
- * Compatible with official BPB deployment flow:
- * - Create KV namespace and bind as "kv"
- * - Inject EMBEDED_SETTINGS (accID, accEmail, apiToken, vlUUID, trPass, securePath, mainDomain)
- * - Optional Durable Object (SESSIONS / WebProxySession) for TWP compatibility
- * - Return panel login URL + account email
+ * BPB Panel deployer — uses worker built from upstream main source
+ * (bia-pain-bache/BPB-Worker-Panel @ main), not GitHub Releases.
  */
 
 import { obfuscateWorkerCode } from "./obfuscate.js";
 
 const CF_API = "https://api.cloudflare.com/client/v4";
+// Compiled from official main branch source (npm run build), hosted on this fork's wizard branch
 const WORKER_JS_URL =
-  "https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/latest/download/worker.js";
+  "https://raw.githubusercontent.com/MHDLabs/BPB-Worker-Panel/wizard/wizard/panel-worker.base.js";
 const TWP_MIGRATION_TAG = "v1-twp";
 
 export async function verifyToken(token) {
@@ -90,21 +87,8 @@ async function getWorkersSubdomain(token, accountId) {
     headers: { Authorization: `Bearer ${token}` },
   });
   const data = await res.json();
-  if (!data.success || !data.result?.subdomain) {
-    // Try to enable / create subdomain
-    const put = await fetch(`${CF_API}/accounts/${accountId}/workers/subdomain`, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ subdomain: "bpb" + Math.random().toString(36).slice(2, 8) }),
-    });
-    const putData = await put.json();
-    if (putData.success && putData.result?.subdomain) return putData.result.subdomain;
-    throw new Error("نتوانستم workers.dev subdomain اکانت را بگیرم");
-  }
-  return data.result.subdomain;
+  if (data.success && data.result?.subdomain) return data.result.subdomain;
+  throw new Error("workers.dev subdomain اکانت پیدا نشد. یک‌بار از داشبورد Workers یک Worker بسازید تا subdomain فعال شود.");
 }
 
 async function createKVNamespace(token, accountId, title) {
@@ -143,12 +127,15 @@ async function getWorkerMigrationTag(token, accountId, scriptName) {
 
 async function fetchWorkerScript() {
   const res = await fetch(WORKER_JS_URL, {
-    headers: { "User-Agent": "BPB-Wizard/1.0" },
+    headers: { "User-Agent": "BPB-Wizard/1.1" },
     redirect: "follow",
   });
-  if (!res.ok) throw new Error(`دانلود worker.js ناموفق (${res.status})`);
+  if (!res.ok) throw new Error(`دانلود کد اصلی worker از مخزن ناموفق (${res.status})`);
   const text = await res.text();
-  if (!text || text.length < 1000) throw new Error("فایل worker.js ناقص است");
+  if (!text || text.length < 1000) throw new Error("فایل worker ناقص است");
+  if (text.includes("EMBEDED_SETTINGS")) {
+    // already injected somehow — still ok
+  }
   return text;
 }
 
@@ -173,7 +160,7 @@ export async function deployWorker(
   onProgress?.("در حال ساخت KV Namespace...");
   const kvId = await createKVNamespace(token, accountId, `bpb-${workerName}`);
 
-  onProgress?.("در حال دانلود آخرین worker.js از ریلیز رسمی...");
+  onProgress?.("در حال دریافت آخرین کد از مخزن اصلی (main → build)...");
   let raw = await fetchWorkerScript();
 
   const vlUUID = randomUUID();
@@ -195,11 +182,11 @@ export async function deployWorker(
     mainDomain,
   };
 
-  onProgress?.("در حال تزریق تنظیمات پنل (EMBEDED_SETTINGS)...");
+  onProgress?.("در حال تزریق EMBEDED_SETTINGS...");
   let script = buildEmbeddedScript(raw, settings);
 
   if (options.obfuscate !== false) {
-    onProgress?.("در حال مبهم‌سازی کد (jasaz-style)...");
+    onProgress?.("در حال مبهم‌سازی کد...");
     script = obfuscateWorkerCode(script);
   }
 
@@ -213,7 +200,7 @@ export async function deployWorker(
     } catch (_) {}
   }
 
-  onProgress?.("در حال آماده‌سازی metadata و bindings...");
+  onProgress?.("آماده‌سازی metadata (KV + DO)...");
   const existingTag = await getWorkerMigrationTag(token, accountId, workerName);
 
   const metadata = {
@@ -228,7 +215,6 @@ export async function deployWorker(
         class_name: "WebProxySession",
       },
     ],
-    // Keep existing secrets/bindings on update when possible
     keep_bindings: ["secret_text"],
   };
 
@@ -238,18 +224,12 @@ export async function deployWorker(
       new_sqlite_classes: ["WebProxySession"],
     };
   } else {
-    metadata.migrations = {
-      old_tag: existingTag,
-      new_tag: existingTag,
-    };
+    metadata.migrations = { old_tag: existingTag, new_tag: existingTag };
   }
 
-  onProgress?.("در حال آپلود Worker به Cloudflare...");
+  onProgress?.("آپلود Worker روی Cloudflare...");
   const form = new FormData();
-  form.append(
-    "metadata",
-    new Blob([JSON.stringify(metadata)], { type: "application/json" })
-  );
+  form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
   form.append(
     "worker.js",
     new Blob([script], { type: "application/javascript+module" }),
@@ -267,12 +247,11 @@ export async function deployWorker(
   const putData = await putRes.json();
   if (!putData.success) {
     throw new Error(
-      "آپلود Worker ناموفق: " +
-        (putData.errors?.[0]?.message || JSON.stringify(putData.errors || putData))
+      "آپلود ناموفق: " + (putData.errors?.[0]?.message || JSON.stringify(putData.errors || putData))
     );
   }
 
-  onProgress?.("فعال‌سازی ساب‌دامین workers.dev...");
+  onProgress?.("فعال‌سازی workers.dev...");
   await fetch(
     `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
     {
@@ -286,33 +265,25 @@ export async function deployWorker(
   );
 
   const panelBase = `https://${mainDomain}`;
-  const loginUrl = `${panelBase}/${securePath}/login`;
-  const panelUrl = `${panelBase}/${securePath}/panel`;
-
   return {
     workerName,
     mainDomain,
-    loginUrl,
-    panelUrl,
+    loginUrl: `${panelBase}/${securePath}/login`,
+    panelUrl: `${panelBase}/${securePath}/panel`,
     email: accountEmail,
     securePath,
     vlUUID,
-    // do not return apiToken or raw secret passwords beyond what's needed
   };
 }
 
-/** Lightweight health check of a deployed panel login page */
 export async function probeWorker(url) {
   try {
     const res = await fetch(url, {
       method: "GET",
       redirect: "manual",
-      headers: { "User-Agent": "BPB-Wizard-Probe/1.0" },
+      headers: { "User-Agent": "BPB-Wizard-Probe/1.1" },
     });
-    return {
-      ok: res.status >= 200 && res.status < 500,
-      status: res.status,
-    };
+    return { ok: res.status >= 200 && res.status < 500, status: res.status };
   } catch (e) {
     return { ok: false, status: 0, error: e.message };
   }

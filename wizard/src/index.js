@@ -620,50 +620,209 @@ const HTML = `<!DOCTYPE html>
   </main>
 
   <script>
-    const KEY_DEPLOYS = "bpb-panel-deploys-v3";
-    const KEY_TOKEN = "bpb-panel-token";
+(function () {
+  const KEY_DEPLOYS = "bpb-panel-deploys-v4";
+  const KEY_TOKEN = "bpb-panel-token";
 
-    const tokenInput = document.getElementById("token");
-    const nameInput = document.getElementById("name");
-    const forceInput = document.getElementById("force");
-    const obfuscateInput = document.getElementById("obfuscate");
-    const deployBtn = document.getElementById("btn");
-    const formEl = document.getElementById("form");
-    const logEl = document.getElementById("log");
-    const historyEl = document.getElementById("history");
-    const resultCard = document.getElementById("result");
+  const $ = (id) => document.getElementById(id);
+  const tokenInput = $("token");
+  const nameInput = $("name");
+  const forceInput = $("force");
+  const obfuscateInput = $("obfuscate");
+  const formEl = $("form");
+  const deployBtn = $("btn");
+  const logEl = $("log");
+  const historyEl = $("history");
+  const resultCard = $("result");
 
-    const savedToken = localStorage.getItem(KEY_TOKEN) || "";
-    if (savedToken) tokenInput.value = savedToken;
+  if (localStorage.getItem(KEY_TOKEN)) {
+    tokenInput.value = localStorage.getItem(KEY_TOKEN);
+  }
 
-    function loadDeploys() {
-      try { return JSON.parse(localStorage.getItem(KEY_DEPLOYS) || "[]"); }
-      catch { return []; }
-    }
-    function saveDeploys(list) {
-      localStorage.setItem(KEY_DEPLOYS, JSON.stringify(list.slice(0, 40)));
-    }
-    function fmtTime(ts) {
-      try { return new Date(ts).toLocaleString("fa-IR"); } catch { return ""; }
-    }
-    function esc(s) {
-      return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
-    }
-    function logLine(msg, isErr) {
-      const line = document.createElement("div");
-      line.className = isErr ? "err" : "";
-      line.textContent = msg;
-      logEl.appendChild(line);
-      logEl.scrollTop = logEl.scrollHeight;
-    }
-    function token() {
-      return (tokenInput.value || "").trim();
-    }
+  function loadDeploys() {
+    try { return JSON.parse(localStorage.getItem(KEY_DEPLOYS) || "[]"); }
+    catch { return []; }
+  }
+  function saveDeploys(list) {
+    localStorage.setItem(KEY_DEPLOYS, JSON.stringify(list.slice(0, 40)));
+  }
+  function fmtTime(ts) {
+    try { return new Date(ts).toLocaleString("fa-IR"); } catch { return ""; }
+  }
+  function esc(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+    );
+  }
+  function logLine(msg, isErr) {
+    const line = document.createElement("div");
+    if (isErr) line.className = "err";
+    line.textContent = msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
 
-    function renderHistory() {
-      const list = loadDeploys();
-      if (!list.length) {
-        historyEl.innerHTML = \`<div class="empty">هنوز دیپلویی ذخیره نشده</div>\`;
+  function renderHistory() {
+    const list = loadDeploys();
+    if (!list.length) {
+      historyEl.innerHTML = '<div class="empty">هنوز دیپلویی ذخیره نشده</div>';
+      return;
+    }
+    historyEl.innerHTML = list.map((d, i) => \`
+      <div class="item" data-i="\${i}">
+        <div class="item-top">
+          <strong>\${esc(d.workerName || "worker")}</strong>
+          <span class="muted">\${esc(fmtTime(d.ts))}</span>
+        </div>
+        <div class="item-row"><span>ایمیل لاگین</span><code>\${esc(d.email || "—")}</code></div>
+        <div class="item-row"><span>لینک ورود پنل</span><code>\${esc(d.url || "—")}</code></div>
+        <div class="item-actions">
+          <button type="button" class="btn ghost sm" data-act="copy-url" data-i="\${i}">کپی لینک</button>
+          <button type="button" class="btn ghost sm" data-act="copy-email" data-i="\${i}">کپی ایمیل</button>
+          <button type="button" class="btn ghost sm" data-act="open" data-i="\${i}">باز کردن</button>
+          <button type="button" class="btn danger sm" data-act="forget" data-i="\${i}">حذف از تاریخچه</button>
+        </div>
+      </div>\`).join("");
+  }
+
+  function showResult(d) {
+    if (!resultCard) return;
+    resultCard.classList.remove("hidden");
+    const set = (id, val) => { const el = $(id); if (el) el.textContent = val || "—"; };
+    set("rEmail", d.email);
+    set("rLogin", d.url);
+    set("rPanel", d.panelUrl || d.url);
+    set("rWorker", d.workerName);
+    set("rDomain", d.mainDomain);
+    const openBtn = $("openUrl");
+    if (openBtn) openBtn.onclick = () => window.open(d.url, "_blank", "noopener");
+    const copyLogin = $("copyLogin");
+    if (copyLogin) copyLogin.onclick = async () => {
+      await navigator.clipboard.writeText(d.url || "");
+      copyLogin.textContent = "کپی شد";
+      setTimeout(() => (copyLogin.textContent = "کپی لینک ورود"), 1200);
+    };
+    const copyEmail = $("copyEmail");
+    if (copyEmail) copyEmail.onclick = async () => {
+      await navigator.clipboard.writeText(d.email || "");
+      copyEmail.textContent = "کپی شد";
+      setTimeout(() => (copyEmail.textContent = "کپی ایمیل"), 1200);
+    };
+  }
+
+  historyEl.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const i = Number(btn.dataset.i);
+    const list = loadDeploys();
+    const d = list[i];
+    if (!d) return;
+    const act = btn.dataset.act;
+    if (act === "copy-url") {
+      await navigator.clipboard.writeText(d.url || "");
+      btn.textContent = "کپی شد";
+      setTimeout(() => (btn.textContent = "کپی لینک"), 1200);
+    } else if (act === "copy-email") {
+      await navigator.clipboard.writeText(d.email || "");
+      btn.textContent = "کپی شد";
+      setTimeout(() => (btn.textContent = "کپی ایمیل"), 1200);
+    } else if (act === "open") {
+      if (d.url) window.open(d.url, "_blank", "noopener");
+    } else if (act === "forget") {
+      list.splice(i, 1);
+      saveDeploys(list);
+      renderHistory();
+    }
+  });
+
+  $("clear-all")?.addEventListener("click", () => {
+    if (confirm("تاریخچه محلی پاک شود؟ (ورکرها روی Cloudflare حذف نمی‌شوند)")) {
+      localStorage.removeItem(KEY_DEPLOYS);
+      renderHistory();
+    }
+  });
+
+  $("toggle-token")?.addEventListener("click", () => {
+    const isPass = tokenInput.type === "password";
+    tokenInput.type = isPass ? "text" : "password";
+    $("toggle-token").textContent = isPass ? "پنهان" : "نمایش";
+  });
+
+  formEl.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const t = (tokenInput.value || "").trim();
+    if (!t) {
+      alert("API Token را وارد کنید");
+      return;
+    }
+    localStorage.setItem(KEY_TOKEN, t);
+    deployBtn.disabled = true;
+    logEl.innerHTML = "";
+    if (resultCard) resultCard.classList.add("hidden");
+
+    try {
+      const res = await fetch("/api/deploy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: t,
+          name: (nameInput.value || "").trim(),
+          force: !!(forceInput && forceInput.checked),
+          obfuscate: obfuscateInput ? !!obfuscateInput.checked : true,
+        }),
+      });
+      if (!res.ok && !res.body) {
+        throw new Error("پاسخ سرور نامعتبر است (" + res.status + ")");
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let msg;
+          try { msg = JSON.parse(line); } catch { continue; }
+          if (msg.type === "info") logLine(msg.message);
+          else if (msg.type === "error") logLine(msg.message, true);
+          else if (msg.type === "complete") {
+            logLine("✓ دیپلوی کامل شد");
+            const entry = {
+              workerName: msg.workerName,
+              url: msg.url,
+              panelUrl: msg.panelUrl,
+              email: msg.email,
+              accountId: msg.accountId,
+              mainDomain: msg.mainDomain,
+              securePath: msg.securePath,
+              ts: Date.now(),
+            };
+            const list = loadDeploys();
+            list.unshift(entry);
+            saveDeploys(list);
+            renderHistory();
+            showResult(entry);
+          }
+        }
+      }
+    } catch (err) {
+      logLine(err.message || String(err), true);
+    } finally {
+      deployBtn.disabled = false;
+    }
+  });
+
+  renderHistory();
+})();
+</script>
+</body>
+</html>
+`;
         return;
       }
       historyEl.innerHTML = list.map((d, i) => \`
