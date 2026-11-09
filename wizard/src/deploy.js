@@ -1,13 +1,18 @@
 /**
- * Cloudflare API helpers for deploying BPB Panel Worker with Durable Objects.
+ * Cloudflare API helpers for deploying BPB Worker Panel.
+ * Compatible with official BPB deployment flow:
+ * - Create KV namespace and bind as "kv"
+ * - Inject EMBEDED_SETTINGS (accID, accEmail, apiToken, vlUUID, trPass, securePath, mainDomain)
+ * - Optional Durable Object (SESSIONS / WebProxySession) for TWP compatibility
+ * - Return panel login URL + account email
  */
 
 import { obfuscateWorkerCode } from "./obfuscate.js";
 
 const CF_API = "https://api.cloudflare.com/client/v4";
-const REPO_RAW = "https://raw.githubusercontent.com/MHDLabs/TWP-CF/main";
-
-const MODULES = ["index.js", "session.js", "mtproxy.js", "protocol.js", "bridge.js"];
+const WORKER_JS_URL =
+  "https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/latest/download/worker.js";
+const TWP_MIGRATION_TAG = "v1-twp";
 
 export async function verifyToken(token) {
   const res = await fetch(`${CF_API}/user/tokens/verify`, {
@@ -51,49 +56,155 @@ export function randomName() {
   return s;
 }
 
-export function randomSecret() {
-  const bytes = new Uint8Array(16);
+function randomString(charset, min, max) {
+  const len = min + Math.floor(Math.random() * (max - min + 1));
+  let out = "";
+  const bytes = new Uint8Array(len);
   crypto.getRandomValues(bytes);
-  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  for (let i = 0; i < len; i++) out += charset[bytes[i] % charset.length];
+  return out;
 }
 
-async function fetchModule(name) {
-  const res = await fetch(`${REPO_RAW}/${name}`, {
-    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BPB-Deployer/1.0" },
+export function randomUUID() {
+  return crypto.randomUUID();
+}
+
+export function randomPass() {
+  return randomString(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@$&*_-+;:,.",
+    16,
+    32
+  );
+}
+
+export function randomSecurePath() {
+  return randomString(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+    16,
+    32
+  );
+}
+
+async function getWorkersSubdomain(token, accountId) {
+  const res = await fetch(`${CF_API}/accounts/${accountId}/workers/subdomain`, {
+    headers: { Authorization: `Bearer ${token}` },
   });
-  if (!res.ok) throw new Error(`نتوانستم فایل ${name} را از GitHub بگیرم (${res.status})`);
-  return res.text();
+  const data = await res.json();
+  if (!data.success || !data.result?.subdomain) {
+    // Try to enable / create subdomain
+    const put = await fetch(`${CF_API}/accounts/${accountId}/workers/subdomain`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ subdomain: "bpb" + Math.random().toString(36).slice(2, 8) }),
+    });
+    const putData = await put.json();
+    if (putData.success && putData.result?.subdomain) return putData.result.subdomain;
+    throw new Error("نتوانستم workers.dev subdomain اکانت را بگیرم");
+  }
+  return data.result.subdomain;
 }
 
-export async function deployWorker(token, accountId, workerName, secret, onProgress, options = {}) {
-  onProgress?.("در حال دریافت کد پروژه از GitHub...");
-  const modules = {};
-  for (const name of MODULES) {
-    modules[name] = await fetchModule(name);
+async function createKVNamespace(token, accountId, title) {
+  const res = await fetch(`${CF_API}/accounts/${accountId}/storage/kv/namespaces`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title }),
+  });
+  const data = await res.json();
+  if (!data.success || !data.result?.id) {
+    throw new Error(
+      "ساخت KV ناموفق: " + (data.errors?.[0]?.message || JSON.stringify(data.errors || data))
+    );
   }
+  return data.result.id;
+}
 
-  // Integrity: reject empty/truncated modules from CDN/GitHub glitches
-  for (const [name, content] of Object.entries(modules)) {
-    if (!content || content.length < 64) {
-      throw new Error(`فایل ${name} ناقص یا خالی است`);
-    }
-    if (name.endsWith(".js") && !content.includes("export")) {
-      throw new Error(`فایل ${name} ساختار ماژول معتبر ندارد`);
-    }
+async function getWorkerMigrationTag(token, accountId, scriptName) {
+  try {
+    const res = await fetch(`${CF_API}/accounts/${accountId}/workers/scripts`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.success || !Array.isArray(data.result)) return null;
+    const entry = data.result.find((s) => s?.id === scriptName);
+    const tag = entry?.migration_tag;
+    return typeof tag === "string" && tag.trim() ? tag.trim() : null;
+  } catch {
+    return null;
   }
+}
 
-  const enableObfuscation = options.obfuscate !== false;
-  if (enableObfuscation) {
+async function fetchWorkerScript() {
+  const res = await fetch(WORKER_JS_URL, {
+    headers: { "User-Agent": "BPB-Wizard/1.0" },
+    redirect: "follow",
+  });
+  if (!res.ok) throw new Error(`دانلود worker.js ناموفق (${res.status})`);
+  const text = await res.text();
+  if (!text || text.length < 1000) throw new Error("فایل worker.js ناقص است");
+  return text;
+}
+
+function buildEmbeddedScript(raw, settings) {
+  const settingsJSON = JSON.stringify(settings);
+  const ts = new Date().toISOString();
+  return `// ${settings.accEmail}\n// ${ts}\n// @ts-nocheck\nconst EMBEDED_SETTINGS = ${settingsJSON};\n${raw}`;
+}
+
+export async function deployWorker(
+  token,
+  accountId,
+  accountEmail,
+  workerName,
+  onProgress,
+  options = {}
+) {
+  onProgress?.("در حال دریافت workers.dev subdomain...");
+  const cfSubdomain = await getWorkersSubdomain(token, accountId);
+  const mainDomain = `${workerName}.${cfSubdomain}.workers.dev`;
+
+  onProgress?.("در حال ساخت KV Namespace...");
+  const kvId = await createKVNamespace(token, accountId, `bpb-${workerName}`);
+
+  onProgress?.("در حال دانلود آخرین worker.js از ریلیز رسمی...");
+  let raw = await fetchWorkerScript();
+
+  const vlUUID = randomUUID();
+  const trPass = randomPass();
+  const securePath = randomSecurePath();
+
+  const settings = {
+    accID: accountId,
+    accEmail: accountEmail,
+    apiToken: token,
+    vlUUID,
+    trPass,
+    securePath,
+    proxyIpMode: "proxyip",
+    proxyIPs: [],
+    prefixes: [],
+    fallback: "",
+    dohUrl: "",
+    mainDomain,
+  };
+
+  onProgress?.("در حال تزریق تنظیمات پنل (EMBEDED_SETTINGS)...");
+  let script = buildEmbeddedScript(raw, settings);
+
+  if (options.obfuscate !== false) {
     onProgress?.("در حال مبهم‌سازی کد (jasaz-style)...");
-    for (const name of Object.keys(modules)) {
-      modules[name] = obfuscateWorkerCode(modules[name]);
-    }
-  } else {
-    onProgress?.("مبهم‌سازی غیرفعال است");
+    script = obfuscateWorkerCode(script);
   }
 
   if (options.force) {
-    onProgress?.("در حال حذف Worker قبلی (force)...");
+    onProgress?.("حذف Worker قبلی (force)...");
     try {
       await fetch(`${CF_API}/accounts/${accountId}/workers/scripts/${workerName}`, {
         method: "DELETE",
@@ -102,64 +213,68 @@ export async function deployWorker(token, accountId, workerName, secret, onProgr
     } catch (_) {}
   }
 
-  onProgress?.("در حال آماده‌سازی metadata...");
+  onProgress?.("در حال آماده‌سازی metadata و bindings...");
+  const existingTag = await getWorkerMigrationTag(token, accountId, workerName);
+
   const metadata = {
-    main_module: "index.js",
-    compatibility_date: "2025-01-01",
+    main_module: "worker.js",
+    compatibility_date: "2024-09-23",
+    compatibility_flags: ["nodejs_compat"],
     bindings: [
-      { type: "durable_object_namespace", name: "SESSIONS", class_name: "WebProxySession" },
-      { type: "plain_text", name: "SESSION_TTL_SECONDS", text: "300" },
-      { type: "plain_text", name: "MAX_STREAMS", text: "64" },
-      { type: "plain_text", name: "DIAGNOSTICS", text: "0" },
+      { type: "kv_namespace", name: "kv", namespace_id: kvId },
+      {
+        type: "durable_object_namespace",
+        name: "SESSIONS",
+        class_name: "WebProxySession",
+      },
     ],
-    migrations: {
-      new_tag: "v1",
-      new_sqlite_classes: ["WebProxySession"],
-    },
+    // Keep existing secrets/bindings on update when possible
+    keep_bindings: ["secret_text"],
   };
 
-  const form = new FormData();
-  form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
-  for (const [name, content] of Object.entries(modules)) {
-    form.append(name, new Blob([content], { type: "application/javascript+module" }), name);
+  if (!existingTag) {
+    metadata.migrations = {
+      new_tag: TWP_MIGRATION_TAG,
+      new_sqlite_classes: ["WebProxySession"],
+    };
+  } else {
+    metadata.migrations = {
+      old_tag: existingTag,
+      new_tag: existingTag,
+    };
   }
 
-  onProgress?.(`در حال دیپلوی Worker به نام «${workerName}»...`);
-  const uploadRes = await fetch(
-    `${CF_API}/accounts/${accountId}/workers/scripts/${workerName}`,
+  onProgress?.("در حال آپلود Worker به Cloudflare...");
+  const form = new FormData();
+  form.append(
+    "metadata",
+    new Blob([JSON.stringify(metadata)], { type: "application/json" })
+  );
+  form.append(
+    "worker.js",
+    new Blob([script], { type: "application/javascript+module" }),
+    "worker.js"
+  );
+
+  const putRes = await fetch(
+    `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}`,
     {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}` },
       body: form,
     }
   );
-  const uploadData = await uploadRes.json();
-  if (!uploadData.success) {
-    const msg = uploadData.errors?.map((e) => e.message).join("; ") || "خطای ناشناخته در آپلود";
-    throw new Error(msg);
+  const putData = await putRes.json();
+  if (!putData.success) {
+    throw new Error(
+      "آپلود Worker ناموفق: " +
+        (putData.errors?.[0]?.message || JSON.stringify(putData.errors || putData))
+    );
   }
 
-  onProgress?.("در حال تنظیم PROXY_SECRET...");
-  const secretRes = await fetch(
-    `${CF_API}/accounts/${accountId}/workers/scripts/${workerName}/secrets`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ name: "PROXY_SECRET", text: secret, type: "secret_text" }),
-    }
-  );
-  const secretData = await secretRes.json();
-  if (!secretData.success) {
-    throw new Error("تنظیم Secret ناموفق بود: " + (secretData.errors?.[0]?.message || "unknown"));
-  }
-
-  onProgress?.("در حال فعال‌سازی subdomain...");
-  // Enable workers.dev
+  onProgress?.("فعال‌سازی ساب‌دامین workers.dev...");
   await fetch(
-    `${CF_API}/accounts/${accountId}/workers/scripts/${workerName}/subdomain`,
+    `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
     {
       method: "POST",
       headers: {
@@ -168,74 +283,37 @@ export async function deployWorker(token, accountId, workerName, secret, onProgr
       },
       body: JSON.stringify({ enabled: true }),
     }
-  ).catch(() => {}); // non-fatal on some accounts
-
-  // Get workers.dev subdomain
-  let subdomain = "workers.dev";
-  try {
-    const subRes = await fetch(
-      `${CF_API}/accounts/${accountId}/workers/subdomain`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const subData = await subRes.json();
-    if (subData.success && subData.result?.subdomain) {
-      subdomain = `${subData.result.subdomain}.workers.dev`;
-    }
-  } catch {}
-
-  const url = `https://${workerName}.${subdomain}`;
-  return { url, workerName, secret, subdomain };
-}
-
-export async function resetSecret(token, accountId, workerName) {
-  const secret = randomSecret();
-  const res = await fetch(
-    `${CF_API}/accounts/${accountId}/workers/scripts/${workerName}/secrets`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ name: "PROXY_SECRET", text: secret, type: "secret_text" }),
-    }
   );
-  const data = await res.json();
-  if (!data.success) {
-    throw new Error(data.errors?.[0]?.message || "ریست Secret ناموفق بود");
-  }
-  return secret;
+
+  const panelBase = `https://${mainDomain}`;
+  const loginUrl = `${panelBase}/${securePath}/login`;
+  const panelUrl = `${panelBase}/${securePath}/panel`;
+
+  return {
+    workerName,
+    mainDomain,
+    loginUrl,
+    panelUrl,
+    email: accountEmail,
+    securePath,
+    vlUUID,
+    // do not return apiToken or raw secret passwords beyond what's needed
+  };
 }
 
-export async function deleteWorker(token, accountId, workerName) {
-  const res = await fetch(
-    `${CF_API}/accounts/${accountId}/workers/scripts/${workerName}`,
-    {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    }
-  );
-  const data = await res.json();
-  if (!data.success) {
-    throw new Error(data.errors?.[0]?.message || "حذف Worker ناموفق بود");
-  }
-  return true;
-}
-
+/** Lightweight health check of a deployed panel login page */
 export async function probeWorker(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
   try {
     const res = await fetch(url, {
       method: "GET",
-      signal: controller.signal,
       redirect: "manual",
+      headers: { "User-Agent": "BPB-Wizard-Probe/1.0" },
     });
-    clearTimeout(timer);
-    // Any HTTP response means the worker is reachable (404 is expected for root)
-    return { ok: true, status: res.status };
-  } catch (err) {
-    clearTimeout(timer);
-    return { ok: false, error: err.name === "AbortError" ? "timeout" : (err.message || "unreachable") };
+    return {
+      ok: res.status >= 200 && res.status < 500,
+      status: res.status,
+    };
+  } catch (e) {
+    return { ok: false, status: 0, error: e.message };
   }
 }

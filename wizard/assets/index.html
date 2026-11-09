@@ -392,6 +392,7 @@
       margin-top: 0.4rem;
       animation: rise 0.9s ease both;
     }
+  .hidden{display:none!important}
   </style>
 </head>
 <body>
@@ -410,7 +411,7 @@
 
     <section class="glass">
       <form id="form">
-        <a class="token-btn" href="https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=BPB-Deployer" target="_blank" rel="noopener">
+        <a class="token-btn" href="https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=BPB-Wizard" target="_blank" rel="noopener">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" fill="currentColor" opacity=".9"/><path d="M18.5 14l.75 2.25L21.5 17l-2.25.75L18.5 20l-.75-2.25L15.5 17l2.25-.75L18.5 14z" fill="currentColor" opacity=".7"/></svg>
           دریافت Token با دسترسی‌های لازم
         </a>
@@ -434,7 +435,23 @@
       </div>
     </section>
 
-    <section class="glass" id="history-wrap">
+    
+    <section class="glass hidden" id="result">
+      <div class="history-title"><span>نتیجه دیپلوی</span></div>
+      <div class="item-row"><span>ایمیل لاگین پنل</span><code id="rEmail">—</code></div>
+      <div class="item-row"><span>لینک ورود پنل</span><code id="rLogin">—</code></div>
+      <div class="item-row"><span>آدرس پنل</span><code id="rPanel">—</code></div>
+      <div class="item-row"><span>نام Worker</span><code id="rWorker">—</code></div>
+      <div class="item-row"><span>دامنه</span><code id="rDomain">—</code></div>
+      <p class="hint" style="margin:0.6rem 0 0.8rem">برای ورود از <strong>ایمیل اکانت Cloudflare</strong> استفاده کنید و در اولین ورود رمز دلخواه بگذارید.</p>
+      <div class="item-actions">
+        <button type="button" class="btn sm" id="openUrl">باز کردن صفحه ورود</button>
+        <button type="button" class="btn ghost sm" id="copyLogin">کپی لینک ورود</button>
+        <button type="button" class="btn ghost sm" id="copyEmail">کپی ایمیل</button>
+      </div>
+    </section>
+
+<section class="glass" id="history-wrap">
       <div class="history-title">
         <span>دیپلوی‌های این مرورگر</span>
         <span style="display:flex;gap:0.35rem;flex-wrap:wrap">
@@ -451,24 +468,21 @@
   </main>
 
   <script>
-    const KEY_DEPLOYS = "bpb-panel-deploys-v2";
+    const KEY_DEPLOYS = "bpb-panel-deploys-v3";
     const KEY_TOKEN = "bpb-panel-token";
 
-    const form = document.getElementById("form");
-    const btn = document.getElementById("btn");
-    const term = document.getElementById("term");
+    const tokenInput = document.getElementById("token");
+    const nameInput = document.getElementById("name");
+    const forceInput = document.getElementById("force");
+    const obfuscateInput = document.getElementById("obfuscate");
+    const deployBtn = document.getElementById("btn");
+    const formEl = document.getElementById("form");
     const logEl = document.getElementById("log");
     const historyEl = document.getElementById("history");
-    const tokenInput = document.getElementById("token");
+    const resultCard = document.getElementById("result");
 
     const savedToken = localStorage.getItem(KEY_TOKEN) || "";
     if (savedToken) tokenInput.value = savedToken;
-
-    document.getElementById("toggle-token").onclick = () => {
-      const show = tokenInput.type === "password";
-      tokenInput.type = show ? "text" : "password";
-      document.getElementById("toggle-token").textContent = show ? "مخفی" : "نمایش";
-    };
 
     function loadDeploys() {
       try { return JSON.parse(localStorage.getItem(KEY_DEPLOYS) || "[]"); }
@@ -477,31 +491,21 @@
     function saveDeploys(list) {
       localStorage.setItem(KEY_DEPLOYS, JSON.stringify(list.slice(0, 40)));
     }
-    function tgLink(url, secret) {
-      try {
-        const host = new URL(url).hostname;
-        return `https://t.me/webproxy?server=${encodeURIComponent(host)}&secret=${encodeURIComponent(secret)}`;
-      } catch { return ""; }
-    }
     function fmtTime(ts) {
-      try { return new Date(ts).toLocaleString("fa-IR", { dateStyle: "short", timeStyle: "short" }); }
-      catch { return ""; }
+      try { return new Date(ts).toLocaleString("fa-IR"); } catch { return ""; }
     }
     function esc(s) {
-      return String(s || "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+      return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
     }
-
     function logLine(msg, isErr) {
-      term.classList.add("visible");
-      const div = document.createElement("div");
-      div.className = "line" + (isErr ? " err" : "");
-      div.textContent = msg;
-      logEl.appendChild(div);
+      const line = document.createElement("div");
+      line.className = isErr ? "err" : "";
+      line.textContent = msg;
+      logEl.appendChild(line);
       logEl.scrollTop = logEl.scrollHeight;
     }
-
     function token() {
-      return tokenInput.value.trim();
+      return (tokenInput.value || "").trim();
     }
 
     function renderHistory() {
@@ -511,24 +515,25 @@
         return;
       }
       historyEl.innerHTML = list.map((d, i) => `
-        <div class="card" data-i="${i}">
-          <div class="top">
-            <div>
-              <div class="name">${esc(d.workerName || "worker")}</div>
-              <div class="email">${esc(d.email || "—")}</div>
-            </div>
-            <div class="time">${fmtTime(d.at)}</div>
+        <div class="item" data-i="${i}">
+          <div class="item-top">
+            <strong>${esc(d.workerName || d.name || "worker")}</strong>
+            <span class="muted">${esc(fmtTime(d.ts))}</span>
           </div>
-          <div class="link-row">
-            <code title="${esc(d.tg)}">${esc(d.tg)}</code>
-            <button type="button" class="btn ghost sm" data-act="copy" data-i="${i}">کپی لینک</button>
+          <div class="item-row">
+            <span>ایمیل لاگین</span>
+            <code title="${esc(d.email)}">${esc(d.email || "—")}</code>
           </div>
-          <div class="actions">
-            <button type="button" class="btn ok sm" data-act="test" data-i="${i}">تست زنده</button>
-            <button type="button" class="btn ghost sm" data-act="reset" data-i="${i}">ریست Secret</button>
-            <button type="button" class="btn danger sm" data-act="delete" data-i="${i}">حذف Worker</button>
+          <div class="item-row">
+            <span>لینک ورود پنل</span>
+            <code title="${esc(d.url)}">${esc(d.url || "—")}</code>
           </div>
-          <div class="status" id="st-${i}"></div>
+          <div class="item-actions">
+            <button type="button" class="btn ghost sm" data-act="copy-url" data-i="${i}">کپی لینک</button>
+            <button type="button" class="btn ghost sm" data-act="copy-email" data-i="${i}">کپی ایمیل</button>
+            <button type="button" class="btn ghost sm" data-act="open" data-i="${i}">باز کردن</button>
+            <button type="button" class="btn danger sm" data-act="forget" data-i="${i}">حذف از تاریخچه</button>
+          </div>
         </div>
       `).join("");
     }
@@ -537,110 +542,69 @@
       const res = await fetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(body || {}),
       });
       return res.json();
     }
 
-    function setStatus(i, text, cls) {
-      const el = document.getElementById("st-" + i);
-      if (!el) return;
-      el.className = "status " + (cls || "");
-      el.textContent = text;
-    }
-
     historyEl.addEventListener("click", async (e) => {
-      const btnEl = e.target.closest("[data-act]");
-      if (!btnEl) return;
-      const i = Number(btnEl.dataset.i);
+      const btn = e.target.closest("button[data-act]");
+      if (!btn) return;
+      const i = Number(btn.dataset.i);
       const list = loadDeploys();
       const d = list[i];
       if (!d) return;
-      const act = btnEl.dataset.act;
-      const t = token();
+      const act = btn.dataset.act;
 
-      if (act === "copy") {
-        await navigator.clipboard.writeText(d.tg || "");
-        setStatus(i, "لینک کپی شد", "ok");
+      if (act === "copy-url") {
+        await navigator.clipboard.writeText(d.url || "");
+        btn.textContent = "کپی شد";
+        setTimeout(() => btn.textContent = "کپی لینک", 1200);
         return;
       }
-
-      if (act === "test") {
-        setStatus(i, "در حال تست...", "");
-        const r = await api("/api/probe", { url: d.url });
-        if (r.ok) setStatus(i, `آنلاین · HTTP ${r.status}`, "ok");
-        else setStatus(i, `آفلاین · ${r.error || "error"}`, "bad");
+      if (act === "copy-email") {
+        await navigator.clipboard.writeText(d.email || "");
+        btn.textContent = "کپی شد";
+        setTimeout(() => btn.textContent = "کپی ایمیل", 1200);
         return;
       }
-
-      if (!t) {
-        setStatus(i, "اول Token را وارد کنید", "bad");
-        tokenInput.focus();
+      if (act === "open") {
+        if (d.url) window.open(d.url, "_blank", "noopener");
         return;
       }
-
-      if (act === "reset") {
-        if (!confirm("Secret جدید ساخته شود؟ لینک قبلی از کار می‌افتد.")) return;
-        setStatus(i, "در حال ریست Secret...", "");
-        btnEl.disabled = true;
-        try {
-          const r = await api("/api/reset-secret", {
-            token: t,
-            accountId: d.accountId,
-            workerName: d.workerName,
-          });
-          if (!r.ok) throw new Error(r.error || "fail");
-          d.secret = r.secret;
-          d.tg = tgLink(d.url, r.secret);
-          list[i] = d;
-          saveDeploys(list);
-          renderHistory();
-          setStatus(i, "Secret عوض شد · لینک جدید آماده است", "ok");
-        } catch (err) {
-          setStatus(i, err.message || String(err), "bad");
-        } finally {
-          btnEl.disabled = false;
-        }
+      if (act === "forget") {
+        list.splice(i, 1);
+        saveDeploys(list);
+        document.getElementById("toggle-token")?.addEventListener("click", () => {
+      const isPass = tokenInput.type === "password";
+      tokenInput.type = isPass ? "text" : "password";
+      document.getElementById("toggle-token").textContent = isPass ? "پنهان" : "نمایش";
+    });
+    renderHistory();
         return;
-      }
-
-      if (act === "delete") {
-        if (!confirm(`Worker «${d.workerName}» برای همیشه حذف شود؟`)) return;
-        setStatus(i, "در حال حذف...", "");
-        btnEl.disabled = true;
-        try {
-          const r = await api("/api/delete", {
-            token: t,
-            accountId: d.accountId,
-            workerName: d.workerName,
-          });
-          if (!r.ok) throw new Error(r.error || "fail");
-          list.splice(i, 1);
-          saveDeploys(list);
-          renderHistory();
-        } catch (err) {
-          setStatus(i, err.message || String(err), "bad");
-          btnEl.disabled = false;
-        }
       }
     });
 
-    document.getElementById("clear-all").onclick = () => {
-      if (!loadDeploys().length) return;
-      if (confirm("همه دیپلوی‌های ذخیره‌شده از این مرورگر پاک شوند؟")) {
+    document.getElementById("clear-all")?.addEventListener("click", () => {
+      if (confirm("تاریخچه محلی پاک شود؟ (ورکرها روی Cloudflare حذف نمی‌شوند)")) {
         localStorage.removeItem(KEY_DEPLOYS);
-        renderHistory();
+        document.getElementById("toggle-token")?.addEventListener("click", () => {
+      const isPass = tokenInput.type === "password";
+      tokenInput.type = isPass ? "text" : "password";
+      document.getElementById("toggle-token").textContent = isPass ? "پنهان" : "نمایش";
+    });
+    renderHistory();
       }
-    };
+    });
 
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
+    formEl.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
       const t = token();
-      if (!t) return;
+      if (!t) { alert("API Token را وارد کنید"); return; }
       localStorage.setItem(KEY_TOKEN, t);
-      btn.disabled = true;
+      deployBtn.disabled = true;
       logEl.innerHTML = "";
-      term.classList.remove("visible");
+      if (resultCard) resultCard.classList.add("hidden");
 
       try {
         const res = await fetch("/api/deploy", {
@@ -648,77 +612,89 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             token: t,
-            name: document.getElementById("name").value.trim(),
-            force: document.getElementById("force").checked,
-            obfuscate: document.getElementById("obfuscate").checked,
+            name: (nameInput.value || "").trim(),
+            force: !!(forceInput && forceInput.checked),
+            obfuscate: obfuscateInput ? !!obfuscateInput.checked : true,
           }),
         });
         const reader = res.body.getReader();
-        const decoder = new TextDecoder();
+        const dec = new TextDecoder();
         let buf = "";
         while (true) {
-          const { done, value } = await reader.read();
+          const { value, done } = await reader.read();
           if (done) break;
-          buf += decoder.decode(value, { stream: true });
+          buf += dec.decode(value, { stream: true });
           const lines = buf.split("\n");
-          buf = lines.pop();
+          buf = lines.pop() || "";
           for (const line of lines) {
             if (!line.trim()) continue;
-            let msg; try { msg = JSON.parse(line); } catch { continue; }
-            if (msg.type === "info") logLine(msg.message, false);
+            let msg;
+            try { msg = JSON.parse(line); } catch { continue; }
+            if (msg.type === "info") logLine(msg.message);
             else if (msg.type === "error") logLine(msg.message, true);
             else if (msg.type === "complete") {
-              logLine("دیپلوی کامل شد.", false);
-              const tg = tgLink(msg.url, msg.secret);
-              const list = loadDeploys().filter((x) => x.workerName !== msg.workerName);
-              list.unshift({
-                url: msg.url,
-                secret: msg.secret,
+              logLine("✓ دیپلوی کامل شد");
+              const entry = {
                 workerName: msg.workerName,
-                email: msg.email || "",
-                accountId: msg.accountId || "",
-                tg,
-                at: Date.now(),
-              });
+                url: msg.url,
+                panelUrl: msg.panelUrl,
+                email: msg.email,
+                accountId: msg.accountId,
+                mainDomain: msg.mainDomain,
+                securePath: msg.securePath,
+                ts: Date.now(),
+              };
+              const list = loadDeploys();
+              list.unshift(entry);
               saveDeploys(list);
-              renderHistory();
+              document.getElementById("toggle-token")?.addEventListener("click", () => {
+      const isPass = tokenInput.type === "password";
+      tokenInput.type = isPass ? "text" : "password";
+      document.getElementById("toggle-token").textContent = isPass ? "پنهان" : "نمایش";
+    });
+    renderHistory();
+              showResult(entry);
             }
           }
         }
       } catch (err) {
         logLine(err.message || String(err), true);
       } finally {
-        btn.disabled = false;
+        deployBtn.disabled = false;
       }
     });
 
-    
-    document.getElementById("export-hist").onclick = () => {
-      const blob = new Blob([JSON.stringify(loadDeploys(), null, 2)], { type: "application/json" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "bpb-panel-deploys.json";
-      a.click();
-      URL.revokeObjectURL(a.href);
-    };
-    document.getElementById("import-hist").onclick = () => document.getElementById("import-file").click();
-    document.getElementById("import-file").onchange = async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      try {
-        const data = JSON.parse(await file.text());
-        if (!Array.isArray(data)) throw new Error("invalid");
-        const cleaned = data.filter((d) => d && d.url && d.workerName).slice(0, 40);
-        saveDeploys(cleaned);
-        renderHistory();
-      } catch {
-        alert("فایل تاریخچه نامعتبر است");
-      }
-      e.target.value = "";
-    };
+    function showResult(d) {
+      if (!resultCard) return;
+      resultCard.classList.remove("hidden");
+      const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val || "—"; };
+      set("rEmail", d.email);
+      set("rLogin", d.url);
+      set("rPanel", d.panelUrl || d.url);
+      set("rWorker", d.workerName);
+      set("rDomain", d.mainDomain);
+      const openBtn = document.getElementById("openUrl");
+      if (openBtn) openBtn.onclick = () => window.open(d.url, "_blank", "noopener");
+      const copyLogin = document.getElementById("copyLogin");
+      if (copyLogin) copyLogin.onclick = async () => {
+        await navigator.clipboard.writeText(d.url || "");
+        copyLogin.textContent = "کپی شد";
+        setTimeout(() => copyLogin.textContent = "کپی لینک ورود", 1200);
+      };
+      const copyEmail = document.getElementById("copyEmail");
+      if (copyEmail) copyEmail.onclick = async () => {
+        await navigator.clipboard.writeText(d.email || "");
+        copyEmail.textContent = "کپی شد";
+        setTimeout(() => copyEmail.textContent = "کپی ایمیل", 1200);
+      };
+    }
 
+    document.getElementById("toggle-token")?.addEventListener("click", () => {
+      const isPass = tokenInput.type === "password";
+      tokenInput.type = isPass ? "text" : "password";
+      document.getElementById("toggle-token").textContent = isPass ? "پنهان" : "نمایش";
+    });
     renderHistory();
-
-  </script>
+</script>
 </body>
 </html>

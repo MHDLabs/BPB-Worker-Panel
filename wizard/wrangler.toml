@@ -3,6 +3,10 @@ main = "src/index.js"
 compatibility_date = "2025-01-01"
 workers_dev = true
 
+# This wrangler.toml is for the WIZARD itself (the deployer UI worker).
+# The panel it deploys gets its own bindings (KV + Durable Object) via Cloudflare API
+# in src/deploy.js — not from this file.
+
 [assets]
 directory = "assets"
 binding = "ASSETS"
