@@ -191,7 +191,6 @@ export async function deployWorker(
     } catch (_) {}
   }
 
-  onProgress?.("آپلود Worker (binding: kv)...");
   const metadata = {
     main_module: "worker.js",
     compatibility_date: new Date().toISOString().split("T")[0],
@@ -199,23 +198,35 @@ export async function deployWorker(
     bindings: [{ type: "kv_namespace", name: "kv", namespace_id: kvId }],
   };
 
-  const form = new FormData();
-  form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
-  form.append(
-    "worker.js",
-    new Blob([script], { type: "application/javascript+module" }),
-    "worker.js"
-  );
+  async function upload(scriptBody) {
+    const form = new FormData();
+    form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+    form.append(
+      "worker.js",
+      new Blob([scriptBody], { type: "application/javascript+module" }),
+      "worker.js"
+    );
+    const putRes = await fetch(
+      `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}`,
+      {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      }
+    );
+    return putRes.json();
+  }
 
-  const putRes = await fetch(
-    `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}`,
-    {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
+  onProgress?.("آپلود Worker (binding: kv)...");
+  let putData = await upload(script);
+  if (!putData.success && options.obfuscate) {
+    const msg = putData.errors?.[0]?.message || "";
+    if (/SyntaxError|Unexpected/i.test(msg)) {
+      onProgress?.("مبهم‌سازی jasaz با worker مینفی BPB سازگار نبود — آپلود بدون obfuscate...");
+      script = buildEmbeddedScript(raw, settings);
+      putData = await upload(script);
     }
-  );
-  const putData = await putRes.json();
+  }
   if (!putData.success) {
     throw new Error(
       "آپلود ناموفق: " + (putData.errors?.[0]?.message || JSON.stringify(putData.errors || putData))
