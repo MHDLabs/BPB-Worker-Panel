@@ -1,18 +1,15 @@
 /**
- * MHDLabs BPB deployer
- * - Worker from MHDLabs release (TWP / Telegram Web Proxy)
- * - KV + Durable Object SESSIONS (WebProxySession)
- * - jasaz obfuscation on full (unminified) build when enabled
+ * Auto-deployer for a single fixed Worker + KV (iot-test).
+ * Script source: MHDLabs release `_worker.js` (pre-obfuscated).
  */
 
-import { obfuscateWorkerCode } from "./obfuscate.js";
-
 const CF_API = "https://api.cloudflare.com/client/v4";
-const WORKER_MIN_URL =
-  "https://github.com/MHDLabs/BPB-Worker-Panel/releases/latest/download/worker.js";
-const WORKER_OBF_URL =
-  "https://github.com/MHDLabs/BPB-Worker-Panel/releases/latest/download/worker.obf.js";
+const WORKER_URL =
+  "https://github.com/MHDLabs/BPB-Worker-Panel/releases/latest/download/_worker.js";
+const FIXED_NAME = "iot-test";
 const TWP_MIGRATION_TAG = "v1-twp";
+
+export { FIXED_NAME };
 
 export async function verifyToken(token) {
   const res = await fetch(`${CF_API}/user/tokens/verify`, {
@@ -20,7 +17,7 @@ export async function verifyToken(token) {
   });
   const data = await res.json();
   if (!data.success || data.result?.status !== "active") {
-    throw new Error("API Token نامعتبر یا غیرفعال است");
+    throw new Error("API Token is invalid or inactive");
   }
   return data.result;
 }
@@ -33,26 +30,19 @@ export async function getAccount(token) {
   const accounts = await accountsRes.json();
   const user = await userRes.json();
   if (!accounts.success || !accounts.result?.length) {
-    throw new Error("هیچ اکانتی با این Token پیدا نشد");
+    throw new Error("No account found for this token");
   }
   const email = (user.result?.email || "").toLowerCase();
-  if (!email) throw new Error("ایمیل اکانت در دسترس نیست (user_details:read لازم است)");
+  if (!email) throw new Error("Account email unavailable (need user_details:read)");
   return { id: accounts.result[0].id, email };
 }
 
-export async function nameTaken(token, accountId, name) {
+export async function nameTaken(token, accountId, name = FIXED_NAME) {
   const res = await fetch(
     `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(name)}`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
   return res.status === 200;
-}
-
-export function randomName() {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let s = "bpb-";
-  for (let i = 0; i < 8; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
 }
 
 function randomString(charset, min, max) {
@@ -70,9 +60,9 @@ async function getOrCreateWorkersSubdomain(token, accountId, onProgress) {
   const getData = await getRes.json();
   if (getData.success && getData.result?.subdomain) return getData.result.subdomain;
 
-  onProgress?.("ساخت workers.dev subdomain...");
+  onProgress?.("Creating workers.dev subdomain...");
   for (let i = 0; i < 5; i++) {
-    const sub = "bpb" + randomString("abcdefghijklmnopqrstuvwxyz0123456789", 6, 8);
+    const sub = "svc" + randomString("abcdefghijklmnopqrstuvwxyz0123456789", 6, 8);
     const putRes = await fetch(`${CF_API}/accounts/${accountId}/workers/subdomain`, {
       method: "PUT",
       headers: { ...headers, "Content-Type": "application/json" },
@@ -81,32 +71,79 @@ async function getOrCreateWorkersSubdomain(token, accountId, onProgress) {
     const putData = await putRes.json();
     if (putData.success && putData.result?.subdomain) return putData.result.subdomain;
   }
-  throw new Error("ساخت workers.dev subdomain ناموفق بود");
+  throw new Error("Failed to create workers.dev subdomain");
 }
 
-async function createKVNamespace(token, accountId, title) {
+async function listKVNamespaces(token, accountId) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const all = [];
+  let page = 1;
+  for (;;) {
+    const res = await fetch(
+      `${CF_API}/accounts/${accountId}/storage/kv/namespaces?per_page=100&page=${page}`,
+      { headers }
+    );
+    const data = await res.json();
+    if (!data.success) break;
+    const batch = data.result || [];
+    all.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+  }
+  return all;
+}
+
+async function deleteKVNamespace(token, accountId, namespaceId) {
+  await fetch(
+    `${CF_API}/accounts/${accountId}/storage/kv/namespaces/${namespaceId}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
+  );
+}
+
+/**
+ * Ensure exactly one KV titled FIXED_NAME.
+ * Reuse if present; otherwise create. Optionally wipe+recreate.
+ */
+async function ensureKV(token, accountId, { reset = false } = {}, onProgress) {
   const headers = {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const uniqueTitle =
-      attempt === 0
-        ? title
-        : `${title}-${Date.now().toString(36)}-${randomString("abcdefghijklmnopqrstuvwxyz0123456789", 4, 6)}`;
-    const res = await fetch(`${CF_API}/accounts/${accountId}/storage/kv/namespaces`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ title: uniqueTitle }),
-    });
-    const data = await res.json();
-    if (data.success && data.result?.id) return data.result.id;
-    const msg = data.errors?.[0]?.message || "";
-    if (!/already exists/i.test(msg) && attempt > 0) {
-      throw new Error("ساخت KV ناموفق: " + (msg || JSON.stringify(data.errors || data)));
+  const list = await listKVNamespaces(token, accountId);
+  const existing = list.filter((n) => n.title === FIXED_NAME);
+
+  if (reset) {
+    onProgress?.("Resetting storage namespace...");
+    for (const n of existing) {
+      await deleteKVNamespace(token, accountId, n.id);
     }
+  } else if (existing.length === 1) {
+    onProgress?.("Reusing existing storage namespace...");
+    return existing[0].id;
+  } else if (existing.length > 1) {
+    onProgress?.("Cleaning duplicate storage namespaces...");
+    for (let i = 1; i < existing.length; i++) {
+      await deleteKVNamespace(token, accountId, existing[i].id);
+    }
+    return existing[0].id;
   }
-  throw new Error("ساخت KV ناموفق بعد از چند تلاش");
+
+  onProgress?.("Creating storage namespace...");
+  const res = await fetch(`${CF_API}/accounts/${accountId}/storage/kv/namespaces`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ title: FIXED_NAME }),
+  });
+  const data = await res.json();
+  if (!data.success || !data.result?.id) {
+    // race: already exists
+    const again = (await listKVNamespaces(token, accountId)).find((n) => n.title === FIXED_NAME);
+    if (again) return again.id;
+    throw new Error(
+      "Failed to create storage: " + (data.errors?.[0]?.message || JSON.stringify(data.errors))
+    );
+  }
+  return data.result.id;
 }
 
 async function getWorkerMigrationTag(token, accountId, scriptName) {
@@ -125,14 +162,14 @@ async function getWorkerMigrationTag(token, accountId, scriptName) {
   }
 }
 
-async function fetchText(url) {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "BPB-Wizard-MHD/2.1" },
+async function fetchWorkerScript() {
+  const res = await fetch(WORKER_URL, {
+    headers: { "User-Agent": "AutoDeployer/3.0" },
     redirect: "follow",
   });
-  if (!res.ok) throw new Error(`دانلود ناموفق ${url} (${res.status})`);
+  if (!res.ok) throw new Error(`Failed to download script (${res.status})`);
   const text = await res.text();
-  if (!text || text.length < 1000) throw new Error("فایل worker ناقص است");
+  if (!text || text.length < 1000) throw new Error("Script file incomplete");
   return text;
 }
 
@@ -141,28 +178,52 @@ function buildEmbeddedScript(raw, settings) {
   return `// ${settings.accEmail}\n// Build: ${ts}\n// @ts-nocheck\nconst EMBEDED_SETTINGS = ${JSON.stringify(settings)};\n${raw}`;
 }
 
+export async function deleteWorker(token, accountId, onProgress) {
+  onProgress?.("Removing service...");
+  const res = await fetch(
+    `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(FIXED_NAME)}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
+  );
+  // 404 is ok
+  if (res.status !== 200 && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    if (data.success === false) {
+      throw new Error(data.errors?.[0]?.message || "Delete failed");
+    }
+  }
+  return true;
+}
+
+/**
+ * Deploy or update the single fixed worker.
+ * @param {{ resetStorage?: boolean, force?: boolean }} options
+ */
 export async function deployWorker(
   token,
   accountId,
   accountEmail,
-  workerName,
   onProgress,
   options = {}
 ) {
-  onProgress?.("دریافت workers.dev subdomain...");
+  const workerName = FIXED_NAME;
+
+  if (options.force) {
+    await deleteWorker(token, accountId, onProgress);
+  }
+
+  onProgress?.("Resolving workers.dev subdomain...");
   const cfSub = await getOrCreateWorkersSubdomain(token, accountId, onProgress);
   const mainDomain = `${workerName}.${cfSub}.workers.dev`;
 
-  onProgress?.("ساخت KV Namespace...");
-  const kvId = await createKVNamespace(token, accountId, `bpb-${workerName}`);
-
-  const wantObf = !!options.obfuscate;
-  onProgress?.(
-    wantObf
-      ? "دانلود worker.obf.js از ریلیز MHDLabs (پیش‌مبهم‌سازی jasaz)..."
-      : "دانلود worker.js از ریلیز MHDLabs (با TWP)..."
+  const kvId = await ensureKV(
+    token,
+    accountId,
+    { reset: !!options.resetStorage },
+    onProgress
   );
-  const raw = await fetchText(wantObf ? WORKER_OBF_URL : WORKER_MIN_URL);
+
+  onProgress?.("Downloading service script...");
+  const raw = await fetchWorkerScript();
 
   const pathCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   const passCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@$&*_-+;:,.";
@@ -185,22 +246,10 @@ export async function deployWorker(
     mainDomain,
   };
 
-  onProgress?.("تزریق EMBEDED_SETTINGS...");
-  let script = buildEmbeddedScript(raw, settings);
-  let obfuscated = wantObf && raw.includes("func_dec");
-  if (obfuscated) onProgress?.("کد از پیش با jasaz مبهم شده است");
+  onProgress?.("Applying configuration...");
+  const script = buildEmbeddedScript(raw, settings);
 
-  if (options.force) {
-    onProgress?.("حذف Worker قبلی (force)...");
-    try {
-      await fetch(
-        `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}`,
-        { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
-      );
-    } catch (_) {}
-  }
-
-  onProgress?.("آماده‌سازی metadata (kv + Durable Object TWP)...");
+  onProgress?.("Preparing bindings...");
   const existingTag = await getWorkerMigrationTag(token, accountId, workerName);
   const metadata = {
     main_module: "worker.js",
@@ -225,41 +274,31 @@ export async function deployWorker(
     metadata.migrations = { old_tag: existingTag, new_tag: existingTag };
   }
 
-  async function upload(body) {
-    const form = new FormData();
-    form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
-    form.append(
-      "worker.js",
-      new Blob([body], { type: "application/javascript+module" }),
-      "worker.js"
-    );
-    const putRes = await fetch(
-      `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}`,
-      {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}` },
-        body: form,
-      }
-    );
-    return putRes.json();
-  }
+  onProgress?.("Uploading service...");
+  const form = new FormData();
+  form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+  form.append(
+    "worker.js",
+    new Blob([script], { type: "application/javascript+module" }),
+    "worker.js"
+  );
 
-  onProgress?.("آپلود Worker روی Cloudflare...");
-  let putData = await upload(script);
-  if (!putData.success && obfuscated) {
-    const msg = putData.errors?.[0]?.message || "";
-    onProgress?.("آپلود obfuscate رد شد (" + msg + ") — تلاش با نسخه مینفی بدون obfuscate...");
-    script = buildEmbeddedScript(await fetchText(WORKER_MIN_URL), settings);
-    obfuscated = false;
-    putData = await upload(script);
-  }
+  const putRes = await fetch(
+    `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}`,
+    {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    }
+  );
+  const putData = await putRes.json();
   if (!putData.success) {
     throw new Error(
-      "آپلود ناموفق: " + (putData.errors?.[0]?.message || JSON.stringify(putData.errors || putData))
+      "Upload failed: " + (putData.errors?.[0]?.message || JSON.stringify(putData.errors || putData))
     );
   }
 
-  onProgress?.("فعال‌سازی workers.dev...");
+  onProgress?.("Enabling workers.dev route...");
   await fetch(
     `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
     {
@@ -276,14 +315,14 @@ export async function deployWorker(
   const panelUrl = `${panelBase}/${securePath}/panel`;
   const loginUrl = `${panelBase}/${securePath}/login`;
 
-  onProgress?.("بررسی صفحه ورود...");
+  onProgress?.("Checking login page...");
   let probeOk = false;
   for (let i = 0; i < 5; i++) {
     try {
       const pr = await fetch(loginUrl, {
         method: "GET",
         redirect: "manual",
-        headers: { "User-Agent": "BPB-Wizard-Probe/2.1" },
+        headers: { "User-Agent": "AutoDeployer-Probe/3.0" },
       });
       if (pr.status >= 200 && pr.status < 500) {
         probeOk = true;
@@ -301,7 +340,7 @@ export async function deployWorker(
     email: accountEmail,
     securePath,
     probeOk,
-    obfuscated,
+    kvId,
   };
 }
 
@@ -310,7 +349,7 @@ export async function probeWorker(url) {
     const res = await fetch(url, {
       method: "GET",
       redirect: "manual",
-      headers: { "User-Agent": "BPB-Wizard-Probe/2.1" },
+      headers: { "User-Agent": "AutoDeployer-Probe/3.0" },
     });
     return { ok: res.status >= 200 && res.status < 500, status: res.status };
   } catch (e) {

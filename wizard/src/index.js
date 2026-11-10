@@ -1,10 +1,10 @@
 import {
   verifyToken,
   getAccount,
-  nameTaken,
-  randomName,
   deployWorker,
+  deleteWorker,
   probeWorker,
+  FIXED_NAME,
 } from "./deploy.js";
 
 export default {
@@ -23,13 +23,18 @@ export default {
     }
 
     if (url.pathname === "/api/deploy" && request.method === "POST") {
-      return streamDeploy(request, url);
+      return streamJob(request, { force: false, resetStorage: false });
     }
-
+    if (url.pathname === "/api/reset" && request.method === "POST") {
+      return streamJob(request, { force: true, resetStorage: true });
+    }
+    if (url.pathname === "/api/delete" && request.method === "POST") {
+      return streamDelete(request);
+    }
     if (url.pathname === "/api/probe" && request.method === "POST") {
       try {
         const body = await request.json();
-        if (!body.url) throw new Error("url الزامی است");
+        if (!body.url) throw new Error("url required");
         const result = await probeWorker(body.url);
         return Response.json({ ok: true, ...result });
       } catch (err) {
@@ -50,7 +55,7 @@ export default {
   },
 };
 
-function streamDeploy(request, url) {
+function streamJob(request, defaults) {
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
@@ -62,57 +67,34 @@ function streamDeploy(request, url) {
       try {
         body = await request.json();
       } catch {
-        await send({ type: "error", message: "بدنه درخواست JSON معتبر نیست" });
+        await send({ type: "error", message: "Invalid JSON body" });
         return;
       }
-
       const token = (body.token || "").trim();
       if (!token) {
-        await send({ type: "error", message: "API Token الزامی است" });
+        await send({ type: "error", message: "API Token required" });
         return;
       }
 
-      await send({ type: "info", message: "بررسی Token... [MHD-v2.1]" });
+      await send({ type: "info", message: "Verifying token..." });
       await verifyToken(token);
 
-      await send({ type: "info", message: "دریافت اطلاعات اکانت..." });
+      await send({ type: "info", message: "Loading account..." });
       const account = await getAccount(token);
-      await send({ type: "info", message: `اکانت: ${account.email}` });
+      await send({ type: "info", message: `Account: ${account.email}` });
+      await send({ type: "info", message: `Service name: ${FIXED_NAME}` });
 
-      let workerName = (body.name || "").trim().toLowerCase();
-      if (workerName) {
-        if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(workerName)) {
-          await send({ type: "error", message: "نام Worker نامعتبر است (فقط a-z, 0-9, -)" });
-          return;
-        }
-        if (!body.force && (await nameTaken(token, account.id, workerName))) {
-          await send({
-            type: "error",
-            message: `نام «${workerName}» قبلاً استفاده شده — گزینه force را فعال کنید`,
-          });
-          return;
-        }
-      } else {
-        do {
-          workerName = randomName();
-        } while (await nameTaken(token, account.id, workerName));
-      }
-
-      await send({ type: "info", message: `نام Worker: ${workerName}` });
+      const force = defaults.force || !!body.force;
+      const resetStorage = defaults.resetStorage || !!body.resetStorage;
 
       const result = await deployWorker(
         token,
         account.id,
         account.email,
-        workerName,
         async (msg) => {
           await send({ type: "info", message: msg });
         },
-        {
-          // default OFF like safer; user can enable (jasaz)
-          obfuscate: body.obfuscate !== false,
-          force: !!body.force,
-        }
+        { force, resetStorage }
       );
 
       await send({
@@ -125,7 +107,7 @@ function streamDeploy(request, url) {
         mainDomain: result.mainDomain,
         securePath: result.securePath,
         probeOk: result.probeOk,
-        obfuscated: !!result.obfuscated,
+        kvId: result.kvId,
       });
     } catch (err) {
       await send({ type: "error", message: err.message || String(err) });
@@ -143,72 +125,110 @@ function streamDeploy(request, url) {
   });
 }
 
-// HTML injected below
+function streamDelete(request) {
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+  const send = (obj) => writer.write(encoder.encode(JSON.stringify(obj) + "\n"));
+
+  (async () => {
+    try {
+      const body = await request.json();
+      const token = (body.token || "").trim();
+      if (!token) {
+        await send({ type: "error", message: "API Token required" });
+        return;
+      }
+      await send({ type: "info", message: "Verifying token..." });
+      await verifyToken(token);
+      const account = await getAccount(token);
+      await send({ type: "info", message: `Account: ${account.email}` });
+      await deleteWorker(token, account.id, async (msg) => {
+        await send({ type: "info", message: msg });
+      });
+      await send({ type: "info", message: "Service removed from Cloudflare" });
+      await send({
+        type: "complete",
+        workerName: FIXED_NAME,
+        email: account.email,
+        accountId: account.id,
+        deleted: true,
+        url: "",
+        panelUrl: "",
+        mainDomain: "",
+        securePath: "",
+        probeOk: true,
+      });
+    } catch (err) {
+      await send({ type: "error", message: err.message || String(err) });
+    } finally {
+      await writer.close();
+    }
+  })();
+
+  return new Response(readable, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
 const HTML = `<!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
-  <title>BPB Panel Deployer</title>
+  <title>Auto Deployer</title>
   <style>
     :root {
-      --bg: #070b14;
-      --card: rgba(18, 24, 40, 0.72);
-      --border: rgba(148, 163, 184, 0.14);
-      --text: #e8eefc;
-      --muted: #94a3b8;
-      --accent: #5b8cff;
-      --accent2: #22d3ee;
-      --ok: #22c55e;
-      --err: #fb7185;
-      --term: #4ade80;
+      --bg: #0b1020; --card: rgba(20,28,48,0.78); --border: rgba(148,163,184,0.14);
+      --text: #e8eefc; --muted: #94a3b8; --accent: #5b8cff; --accent2: #22d3ee;
+      --ok: #22c55e; --err: #fb7185; --term: #4ade80;
     }
     * { box-sizing: border-box; }
-    html, body { margin: 0; min-height: 100%; font-family: Vazirmatn, Tahoma, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    html, body { margin: 0; min-height: 100%; font-family: system-ui, Segoe UI, sans-serif; background: var(--bg); color: var(--text); }
     body {
       background:
-        radial-gradient(1200px 600px at 10% -10%, rgba(91,140,255,0.18), transparent 60%),
-        radial-gradient(900px 500px at 100% 0%, rgba(34,211,238,0.12), transparent 55%),
+        radial-gradient(1000px 500px at 10% -10%, rgba(91,140,255,0.16), transparent 60%),
+        radial-gradient(800px 400px at 100% 0%, rgba(34,211,238,0.1), transparent 55%),
         var(--bg);
     }
     main { width: min(720px, 92vw); margin: 0 auto; padding: 2rem 0 3rem; }
-    .hero { text-align: center; margin-bottom: 1.4rem; }
+    .hero { text-align: center; margin-bottom: 1.3rem; }
     .badge {
-      display: inline-flex; align-items: center; gap: 0.45rem;
-      padding: 0.35rem 0.75rem; border-radius: 999px;
-      border: 1px solid var(--border); background: rgba(255,255,255,0.03);
-      color: var(--muted); font-size: 0.82rem; margin-bottom: 0.7rem;
+      display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.35rem 0.75rem;
+      border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,0.03);
+      color: var(--muted); font-size: 0.82rem; margin-bottom: 0.65rem;
     }
     .badge i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 10px var(--ok); }
-    h1 { margin: 0 0 0.35rem; font-size: 1.55rem; }
+    h1 { margin: 0 0 0.35rem; font-size: 1.5rem; }
     .sub { margin: 0; color: var(--muted); font-size: 0.95rem; }
-    .repo { display: inline-block; margin-top: 0.55rem; color: var(--accent2); text-decoration: none; font-size: 0.85rem; }
     .glass {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: 18px; padding: 1.1rem 1.15rem; margin-bottom: 1rem;
-      backdrop-filter: blur(12px);
+      background: var(--card); border: 1px solid var(--border); border-radius: 18px;
+      padding: 1.1rem 1.15rem; margin-bottom: 1rem; backdrop-filter: blur(12px);
     }
     .token-btn {
       display: flex; align-items: center; justify-content: center; gap: 0.45rem;
-      width: 100%; margin-bottom: 0.9rem; padding: 0.7rem 0.9rem;
-      border-radius: 12px; border: 1px solid rgba(91,140,255,0.35);
+      width: 100%; margin-bottom: 0.85rem; padding: 0.7rem 0.9rem; border-radius: 12px;
+      border: 1px solid rgba(91,140,255,0.35);
       background: linear-gradient(135deg, rgba(91,140,255,0.15), rgba(34,211,238,0.08));
       color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.92rem;
     }
     .field { margin-bottom: 0.8rem; position: relative; }
     label { display: block; margin-bottom: 0.35rem; color: var(--muted); font-size: 0.86rem; }
     input[type="password"], input[type="text"] {
-      width: 100%; padding: 0.7rem 0.85rem; border-radius: 12px;
-      border: 1px solid var(--border); background: rgba(0,0,0,0.28); color: var(--text);
-      outline: none; font-size: 0.95rem;
+      width: 100%; padding: 0.7rem 0.85rem; border-radius: 12px; border: 1px solid var(--border);
+      background: rgba(0,0,0,0.28); color: var(--text); outline: none; font-size: 0.95rem;
     }
     input:focus { border-color: rgba(91,140,255,0.55); }
     .eye {
-      position: absolute; left: 0.55rem; bottom: 0.45rem;
-      border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 0.8rem;
+      position: absolute; right: 0.55rem; bottom: 0.45rem; border: 0; background: transparent;
+      color: var(--muted); cursor: pointer; font-size: 0.8rem;
     }
-    .check { display: flex; align-items: center; gap: 0.45rem; color: var(--muted); font-size: 0.88rem; margin: 0.35rem 0; }
+    .row-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.35rem; }
     .btn {
       width: 100%; margin-top: 0.7rem; padding: 0.8rem 1rem; border: 0; border-radius: 12px;
       background: linear-gradient(135deg, var(--accent), #3b6ef5); color: white;
@@ -245,38 +265,36 @@ const HTML = `<!DOCTYPE html>
     .item-top { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.4rem; }
     .muted { color: var(--muted); font-size: 0.8rem; }
     .item-row { display: flex; justify-content: space-between; gap: 0.6rem; font-size: 0.82rem; margin: 0.25rem 0; }
-    .item-row code { color: var(--accent2); font-size: 0.78rem; word-break: break-all; text-align: left; direction: ltr; }
+    .item-row code { color: var(--accent2); font-size: 0.78rem; word-break: break-all; text-align: left; }
     .item-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.55rem; }
     .empty { color: var(--muted); font-size: 0.88rem; text-align: center; padding: 0.8rem; }
     .hint { color: var(--muted); font-size: 0.8rem; text-align: center; margin: 0.8rem 0 0; }
     .hidden { display: none !important; }
-    #result .item-row { margin: 0.4rem 0; }
+    .note { color: var(--muted); font-size: 0.82rem; margin: 0.4rem 0 0; line-height: 1.45; }
   </style>
 </head>
 <body>
   <main>
     <div class="hero">
-      <div class="badge"><i></i> BPB Panel One-Click Deploy</div>
-      <h1>دیپلوی خودکار پنل BPB</h1>
-      <p class="sub">فورک MHDLabs · Telegram Web Proxy · jasaz</p>
-      <a class="repo" href="https://github.com/MHDLabs/BPB-Worker-Panel" target="_blank" rel="noopener">فورک MHDLabs/BPB-Worker-Panel</a>
+      <div class="badge"><i></i> Cloud service installer</div>
+      <h1>Auto Deployer</h1>
+      <p class="sub">One service per account · fixed name <code>iot-test</code></p>
     </div>
 
     <section class="glass">
       <form id="form" novalidate>
-        <a class="token-btn" id="token-link" href="https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&amp;accountId=%2A&amp;zoneId=all&amp;name=BPB-Wizard" target="_blank" rel="noopener">دریافت Token با دسترسی‌های لازم</a>
+        <a class="token-btn" id="token-link" href="https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&amp;accountId=%2A&amp;zoneId=all&amp;name=auto-deployer" target="_blank" rel="noopener">Create API Token (pre-set permissions)</a>
         <div class="field">
           <label for="token">Cloudflare API Token</label>
-          <input id="token" type="password" placeholder="Token را وارد کنید" autocomplete="off" spellcheck="false">
-          <button type="button" class="eye" id="toggle-token">نمایش</button>
+          <input id="token" type="password" placeholder="Paste token" autocomplete="off" spellcheck="false">
+          <button type="button" class="eye" id="toggle-token">Show</button>
         </div>
-        <div class="field">
-          <label for="name">نام Worker (اختیاری — خالی = تصادفی)</label>
-          <input id="name" type="text" placeholder="مثلاً bpb-my-panel" autocomplete="off">
+        <div class="row-actions">
+          <button type="button" class="btn ghost sm" id="save-token">Save token</button>
+          <button type="button" class="btn ghost sm danger" id="clear-token">Remove saved token</button>
         </div>
-        <label class="check"><input type="checkbox" id="force"> جایگزینی Worker هم‌نام (force)</label>
-        <label class="check"><input type="checkbox" id="obfuscate" checked> مبهم‌سازی jasaz (پیشنهادی)</label>
-        <button class="btn" type="submit" id="btn">شروع دیپلوی</button>
+        <p class="note">Deploys a single service named <strong>iot-test</strong> and one storage namespace with the same name. Existing install is updated in place.</p>
+        <button class="btn" type="submit" id="btn">Deploy / Update</button>
       </form>
 
       <div class="term" id="term">
@@ -286,41 +304,38 @@ const HTML = `<!DOCTYPE html>
     </section>
 
     <section class="glass hidden" id="result">
-      <div class="history-title"><span>نتیجه دیپلوی</span></div>
-      <div class="item-row"><span>ایمیل لاگین</span><code id="rEmail">—</code></div>
-      <div class="item-row"><span>لینک پنل</span><code id="rPanel">—</code></div>
-      <div class="item-row"><span>لینک ورود</span><code id="rLogin">—</code></div>
-      <div class="item-row"><span>Worker</span><code id="rWorker">—</code></div>
-      <div class="item-row"><span>دامنه</span><code id="rDomain">—</code></div>
-      <p class="hint" style="text-align:right;margin:0.6rem 0">با <strong>ایمیل Cloudflare</strong> وارد شوید و در اولین ورود رمز بگذارید.</p>
+      <div class="history-title"><span>Result</span></div>
+      <div class="item-row"><span>Login email</span><code id="rEmail">—</code></div>
+      <div class="item-row"><span>Console URL</span><code id="rPanel">—</code></div>
+      <div class="item-row"><span>Login URL</span><code id="rLogin">—</code></div>
+      <div class="item-row"><span>Service</span><code id="rWorker">iot-test</code></div>
+      <div class="item-row"><span>Host</span><code id="rDomain">—</code></div>
+      <p class="note">Sign in with your Cloudflare account email and set a password on first login.</p>
       <div class="item-actions">
-        <button type="button" class="btn sm" id="openPanel">باز کردن پنل</button>
-        <button type="button" class="btn ghost sm" id="copyPanel">کپی لینک پنل</button>
-        <button type="button" class="btn ghost sm" id="copyEmail">کپی ایمیل</button>
+        <button type="button" class="btn sm" id="openPanel">Open console</button>
+        <button type="button" class="btn ghost sm" id="copyPanel">Copy URL</button>
+        <button type="button" class="btn ghost sm" id="copyEmail">Copy email</button>
       </div>
     </section>
 
-    <section class="glass" id="history-wrap">
+    <section class="glass">
       <div class="history-title">
-        <span>تاریخچه این مرورگر</span>
-        <button type="button" class="btn ghost sm" id="clear-all">پاک‌سازی</button>
+        <span>This browser</span>
+        <button type="button" class="btn ghost sm" id="clear-hist">Clear list</button>
       </div>
       <div id="history"></div>
     </section>
 
-    <p class="hint">Token فقط در همین مرورگر ذخیره می‌شود · ویزارد v2.0</p>
+    <p class="hint">Token stays in this browser only · Auto Deployer v3</p>
   </main>
 
   <script>
   (function () {
-    const KEY_DEPLOYS = "bpb-panel-deploys-v5";
-    const KEY_TOKEN = "bpb-panel-token";
+    const KEY_DEPLOYS = "auto-deployer-history-v1";
+    const KEY_TOKEN = "auto-deployer-token-v1";
     const $ = (id) => document.getElementById(id);
 
     const tokenInput = $("token");
-    const nameInput = $("name");
-    const forceInput = $("force");
-    const obfuscateInput = $("obfuscate");
     const formEl = $("form");
     const deployBtn = $("btn");
     const logEl = $("log");
@@ -328,8 +343,7 @@ const HTML = `<!DOCTYPE html>
     const historyEl = $("history");
     const resultCard = $("result");
 
-    // Official BPB-Wizard token template (compact JSON, same as upstream Go BuildTokenURL)
-    const tokenUrl = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=BPB-Wizard";
+    const tokenUrl = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=auto-deployer";
     const tokenLink = $("token-link");
     if (tokenLink) tokenLink.href = tokenUrl;
 
@@ -339,19 +353,17 @@ const HTML = `<!DOCTYPE html>
       try { return JSON.parse(localStorage.getItem(KEY_DEPLOYS) || "[]"); } catch { return []; }
     }
     function saveDeploys(list) {
-      localStorage.setItem(KEY_DEPLOYS, JSON.stringify(list.slice(0, 40)));
+      localStorage.setItem(KEY_DEPLOYS, JSON.stringify(list.slice(0, 20)));
     }
     function fmtTime(ts) {
-      try { return new Date(ts).toLocaleString("fa-IR"); } catch { return ""; }
+      try { return new Date(ts).toLocaleString(); } catch { return ""; }
     }
     function esc(s) {
       return String(s ?? "").replace(/[&<>"']/g, (c) =>
         ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
       );
     }
-    function showTerm() {
-      termEl.classList.add("visible");
-    }
+    function showTerm() { termEl.classList.add("visible"); }
     function logLine(msg, isErr) {
       showTerm();
       const line = document.createElement("div");
@@ -364,21 +376,23 @@ const HTML = `<!DOCTYPE html>
     function renderHistory() {
       const list = loadDeploys();
       if (!list.length) {
-        historyEl.innerHTML = '<div class="empty">هنوز دیپلویی ذخیره نشده</div>';
+        historyEl.innerHTML = '<div class="empty">No deployments saved in this browser</div>';
         return;
       }
       historyEl.innerHTML = list.map((d, i) => \`
         <div class="item">
           <div class="item-top">
-            <strong>\${esc(d.workerName || "worker")}</strong>
+            <strong>\${esc(d.workerName || "iot-test")}</strong>
             <span class="muted">\${esc(fmtTime(d.ts))}</span>
           </div>
-          <div class="item-row"><span>ایمیل</span><code>\${esc(d.email || "—")}</code></div>
-          <div class="item-row"><span>پنل</span><code>\${esc(d.panelUrl || d.url || "—")}</code></div>
+          <div class="item-row"><span>Email</span><code>\${esc(d.email || "—")}</code></div>
+          <div class="item-row"><span>Console</span><code>\${esc(d.panelUrl || d.url || "—")}</code></div>
           <div class="item-actions">
-            <button type="button" class="btn ghost sm" data-act="open" data-i="\${i}">باز کردن</button>
-            <button type="button" class="btn ghost sm" data-act="copy" data-i="\${i}">کپی لینک</button>
-            <button type="button" class="btn danger sm" data-act="forget" data-i="\${i}">حذف از تاریخچه</button>
+            <button type="button" class="btn ghost sm" data-act="open" data-i="\${i}">Open</button>
+            <button type="button" class="btn ghost sm" data-act="copy" data-i="\${i}">Copy URL</button>
+            <button type="button" class="btn ghost sm" data-act="reset" data-i="\${i}">Force reset</button>
+            <button type="button" class="btn danger sm" data-act="delete-cf" data-i="\${i}">Delete on CF</button>
+            <button type="button" class="btn ghost sm" data-act="forget" data-i="\${i}">Remove from history</button>
           </div>
         </div>\`).join("");
     }
@@ -388,96 +402,41 @@ const HTML = `<!DOCTYPE html>
       $("rEmail").textContent = d.email || "—";
       $("rPanel").textContent = d.panelUrl || "—";
       $("rLogin").textContent = d.url || "—";
-      $("rWorker").textContent = d.workerName || "—";
+      $("rWorker").textContent = d.workerName || "iot-test";
       $("rDomain").textContent = d.mainDomain || "—";
       $("openPanel").onclick = () => window.open(d.panelUrl || d.url, "_blank", "noopener");
       $("copyPanel").onclick = async () => {
         await navigator.clipboard.writeText(d.panelUrl || d.url || "");
-        $("copyPanel").textContent = "کپی شد";
-        setTimeout(() => ($("copyPanel").textContent = "کپی لینک پنل"), 1200);
+        $("copyPanel").textContent = "Copied";
+        setTimeout(() => ($("copyPanel").textContent = "Copy URL"), 1200);
       };
       $("copyEmail").onclick = async () => {
         await navigator.clipboard.writeText(d.email || "");
-        $("copyEmail").textContent = "کپی شد";
-        setTimeout(() => ($("copyEmail").textContent = "کپی ایمیل"), 1200);
+        $("copyEmail").textContent = "Copied";
+        setTimeout(() => ($("copyEmail").textContent = "Copy email"), 1200);
       };
     }
 
-    historyEl.addEventListener("click", async (e) => {
-      const btn = e.target.closest("button[data-act]");
-      if (!btn) return;
-      const list = loadDeploys();
-      const d = list[Number(btn.dataset.i)];
-      if (!d) return;
-      const act = btn.dataset.act;
-      if (act === "open") window.open(d.panelUrl || d.url, "_blank", "noopener");
-      else if (act === "copy") {
-        await navigator.clipboard.writeText(d.panelUrl || d.url || "");
-        btn.textContent = "کپی شد";
-        setTimeout(() => (btn.textContent = "کپی لینک"), 1200);
-      } else if (act === "forget") {
-        list.splice(Number(btn.dataset.i), 1);
-        saveDeploys(list);
-        renderHistory();
-      }
-    });
-
-    $("clear-all").addEventListener("click", () => {
-      if (confirm("تاریخچه محلی پاک شود؟ (ورکرها روی Cloudflare حذف نمی‌شوند)")) {
-        localStorage.removeItem(KEY_DEPLOYS);
-        renderHistory();
-      }
-    });
-
-    $("toggle-token").addEventListener("click", () => {
-      const show = tokenInput.type === "password";
-      tokenInput.type = show ? "text" : "password";
-      $("toggle-token").textContent = show ? "پنهان" : "نمایش";
-    });
-
-    formEl.addEventListener("submit", async (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-
+    async function streamAction(path, body, btn) {
       const t = (tokenInput.value || "").trim();
-      if (!t) {
-        alert("API Token را وارد کنید");
-        tokenInput.focus();
-        return;
-      }
-      const nameVal = (nameInput.value || "").trim().toLowerCase();
-      if (nameVal && !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(nameVal)) {
-        alert("نام Worker نامعتبر است (فقط a-z و 0-9 و -)");
-        nameInput.focus();
-        return;
-      }
-
+      if (!t) { alert("Enter API Token"); return; }
       localStorage.setItem(KEY_TOKEN, t);
+      if (btn) btn.disabled = true;
       deployBtn.disabled = true;
-      deployBtn.textContent = "در حال دیپلوی...";
       logEl.innerHTML = "";
       showTerm();
       resultCard.classList.add("hidden");
-      logLine("شروع...");
-
+      logLine("Starting...");
       try {
-        const res = await fetch("/api/deploy", {
+        const res = await fetch(path, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            token: t,
-            name: nameVal,
-            force: !!forceInput.checked,
-            obfuscate: !!obfuscateInput.checked
-          })
+          body: JSON.stringify({ token: t, ...(body || {}) }),
         });
-
         const ct = (res.headers.get("content-type") || "").toLowerCase();
         if (!res.ok || !ct.includes("ndjson")) {
-          const text = await res.text();
-          throw new Error(text || ("خطای سرور: " + res.status));
+          throw new Error((await res.text()) || ("Server error " + res.status));
         }
-
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = "";
@@ -490,27 +449,27 @@ const HTML = `<!DOCTYPE html>
           for (const line of lines) {
             if (!line.trim()) continue;
             let msg;
-            try { msg = JSON.parse(line); } catch {
-              logLine(line, true);
-              continue;
-            }
+            try { msg = JSON.parse(line); } catch { logLine(line, true); continue; }
             if (msg.type === "info") logLine(msg.message);
             else if (msg.type === "error") logLine(msg.message, true);
             else if (msg.type === "complete") {
               logLine(msg.probeOk === false
-                ? "دیپلوی انجام شد (بررسی صفحه ورود قطعی نبود — چند ثانیه بعد امتحان کنید)"
-                : "✓ دیپلوی کامل شد");
+                ? "Done (login probe inconclusive — try in a few seconds)"
+                : "Done");
               const entry = {
-                workerName: msg.workerName,
+                workerName: msg.workerName || "iot-test",
                 url: msg.url,
                 panelUrl: msg.panelUrl,
                 email: msg.email,
                 accountId: msg.accountId,
                 mainDomain: msg.mainDomain,
                 securePath: msg.securePath,
-                ts: Date.now()
+                ts: Date.now(),
               };
-              const list = loadDeploys();
+              // one entry per account/service
+              let list = loadDeploys().filter(
+                (x) => !(x.workerName === entry.workerName && x.accountId === entry.accountId)
+              );
               list.unshift(entry);
               saveDeploys(list);
               renderHistory();
@@ -522,13 +481,69 @@ const HTML = `<!DOCTYPE html>
         logLine(err.message || String(err), true);
       } finally {
         deployBtn.disabled = false;
-        deployBtn.textContent = "شروع دیپلوی";
+        deployBtn.textContent = "Deploy / Update";
+        if (btn) btn.disabled = false;
       }
+    }
+
+    historyEl.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-act]");
+      if (!btn) return;
+      const list = loadDeploys();
+      const i = Number(btn.dataset.i);
+      const d = list[i];
+      if (!d) return;
+      const act = btn.dataset.act;
+      if (act === "open") window.open(d.panelUrl || d.url, "_blank", "noopener");
+      else if (act === "copy") {
+        await navigator.clipboard.writeText(d.panelUrl || d.url || "");
+        btn.textContent = "Copied";
+        setTimeout(() => (btn.textContent = "Copy URL"), 1200);
+      } else if (act === "forget") {
+        list.splice(i, 1);
+        saveDeploys(list);
+        renderHistory();
+      } else if (act === "reset") {
+        if (!confirm("Force reset service iot-test on Cloudflare? Storage will be recreated and login path will change.")) return;
+        await streamAction("/api/reset", { resetStorage: true }, btn);
+      } else if (act === "delete-cf") {
+        if (!confirm("Delete service iot-test from Cloudflare account?")) return;
+        await streamAction("/api/delete", {}, btn);
+        // keep history unless user removes it
+      }
+    });
+
+    $("clear-hist").addEventListener("click", () => {
+      if (confirm("Clear local history only? (Cloudflare resources stay)")) {
+        localStorage.removeItem(KEY_DEPLOYS);
+        renderHistory();
+      }
+    });
+    $("save-token").addEventListener("click", () => {
+      const t = (tokenInput.value || "").trim();
+      if (!t) { alert("Nothing to save"); return; }
+      localStorage.setItem(KEY_TOKEN, t);
+      alert("Token saved in this browser");
+    });
+    $("clear-token").addEventListener("click", () => {
+      localStorage.removeItem(KEY_TOKEN);
+      tokenInput.value = "";
+      alert("Saved token removed");
+    });
+    $("toggle-token").addEventListener("click", () => {
+      const show = tokenInput.type === "password";
+      tokenInput.type = show ? "text" : "password";
+      $("toggle-token").textContent = show ? "Hide" : "Show";
+    });
+
+    formEl.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      deployBtn.textContent = "Working...";
+      await streamAction("/api/deploy", {}, deployBtn);
     });
 
     renderHistory();
   })();
   </script>
 </body>
-</html>
-`;
+</html>`;

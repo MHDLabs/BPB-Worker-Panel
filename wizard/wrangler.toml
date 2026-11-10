@@ -1,5 +1,4 @@
-name = "bpb-wizard"
+name = "iot-deployer"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 workers_dev = true
-# Panel bindings (kv) are created at deploy-time via API in src/deploy.js
