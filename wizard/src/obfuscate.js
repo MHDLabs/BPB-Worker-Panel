@@ -120,7 +120,9 @@ export function obfuscateWorkerCode(code) {
       const lastToken = prevTrimmed.slice(-1);
       const isTernaryOrCondition = lastToken === "?" || /(?:case)\s*$/.test(prevTrimmed);
 
-      if (isFollowedByColon && !isTernaryOrCondition) {
+      const isMethodKey = code[k] === "(";
+      const isHugeLiteral = typeof rawVal === "string" && rawVal.length > 500;
+      if ((isFollowedByColon && !isTernaryOrCondition) || isMethodKey || isHugeLiteral) {
         output += strLiteral;
       } else {
         const idx = getOrAddString(rawVal);
@@ -155,3 +157,4 @@ function func_dec(idx) {
 `;
   return runtimeHeader + "\n" + output;
 }
+

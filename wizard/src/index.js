@@ -110,7 +110,7 @@ function streamDeploy(request, url) {
         },
         {
           // default OFF like safer; user can enable (jasaz)
-          obfuscate: !!body.obfuscate,
+          obfuscate: body.obfuscate !== false,
           force: !!body.force,
         }
       );
@@ -125,6 +125,7 @@ function streamDeploy(request, url) {
         mainDomain: result.mainDomain,
         securePath: result.securePath,
         probeOk: result.probeOk,
+        obfuscated: !!result.obfuscated,
       });
     } catch (err) {
       await send({ type: "error", message: err.message || String(err) });
@@ -257,8 +258,8 @@ const HTML = `<!DOCTYPE html>
     <div class="hero">
       <div class="badge"><i></i> BPB Panel One-Click Deploy</div>
       <h1>دیپلوی خودکار پنل BPB</h1>
-      <p class="sub">مطابق BPB-Wizard رسمی · مبهم‌سازی اختیاری jasaz</p>
-      <a class="repo" href="https://github.com/bia-pain-bache/BPB-Worker-Panel" target="_blank" rel="noopener">مخزن اصلی BPB-Worker-Panel</a>
+      <p class="sub">فورک MHDLabs · Telegram Web Proxy · jasaz</p>
+      <a class="repo" href="https://github.com/MHDLabs/BPB-Worker-Panel" target="_blank" rel="noopener">فورک MHDLabs/BPB-Worker-Panel</a>
     </div>
 
     <section class="glass">
@@ -274,7 +275,7 @@ const HTML = `<!DOCTYPE html>
           <input id="name" type="text" placeholder="مثلاً bpb-my-panel" autocomplete="off">
         </div>
         <label class="check"><input type="checkbox" id="force"> جایگزینی Worker هم‌نام (force)</label>
-        <label class="check"><input type="checkbox" id="obfuscate"> مبهم‌سازی jasaz (اختیاری)</label>
+        <label class="check"><input type="checkbox" id="obfuscate" checked> مبهم‌سازی jasaz (پیشنهادی)</label>
         <button class="btn" type="submit" id="btn">شروع دیپلوی</button>
       </form>
 
@@ -495,7 +496,7 @@ const HTML = `<!DOCTYPE html>
           const { value, done } = await reader.read();
           if (done) break;
           buf += dec.decode(value, { stream: true });
-          const lines = buf.split("\\n");
+          const lines = buf.split("\n");
           buf = lines.pop() || "";
           for (const line of lines) {
             if (!line.trim()) continue;

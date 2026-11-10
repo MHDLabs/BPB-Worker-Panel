@@ -1,13 +1,18 @@
 /**
- * BPB Panel deployer — aligned with official bia-pain-bache/BPB-Wizard
- * + optional jasaz-style obfuscation (itsyebekhe/jasaz).
+ * MHDLabs BPB deployer
+ * - Worker from MHDLabs release (TWP / Telegram Web Proxy)
+ * - KV + Durable Object SESSIONS (WebProxySession)
+ * - jasaz obfuscation on full (unminified) build when enabled
  */
 
 import { obfuscateWorkerCode } from "./obfuscate.js";
 
 const CF_API = "https://api.cloudflare.com/client/v4";
-const WORKER_JS_URL =
-  "https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/latest/download/worker.js";
+const WORKER_MIN_URL =
+  "https://github.com/MHDLabs/BPB-Worker-Panel/releases/latest/download/worker.js";
+const WORKER_FULL_URL =
+  "https://github.com/MHDLabs/BPB-Worker-Panel/releases/latest/download/worker.full.js";
+const TWP_MIGRATION_TAG = "v1-twp";
 
 export async function verifyToken(token) {
   const res = await fetch(`${CF_API}/user/tokens/verify`, {
@@ -31,7 +36,7 @@ export async function getAccount(token) {
     throw new Error("هیچ اکانتی با این Token پیدا نشد");
   }
   const email = (user.result?.email || "").toLowerCase();
-  if (!email) throw new Error("ایمیل اکانت Cloudflare در دسترس نیست (user_details:read لازم است)");
+  if (!email) throw new Error("ایمیل اکانت در دسترس نیست (user_details:read لازم است)");
   return { id: accounts.result[0].id, email };
 }
 
@@ -59,16 +64,13 @@ function randomString(charset, min, max) {
   return out;
 }
 
-/** workers.dev subdomain like official wizard (get or create) */
 async function getOrCreateWorkersSubdomain(token, accountId, onProgress) {
   const headers = { Authorization: `Bearer ${token}` };
   const getRes = await fetch(`${CF_API}/accounts/${accountId}/workers/subdomain`, { headers });
   const getData = await getRes.json();
-  if (getData.success && getData.result?.subdomain) {
-    return getData.result.subdomain;
-  }
+  if (getData.success && getData.result?.subdomain) return getData.result.subdomain;
 
-  onProgress?.("ساب‌دامین workers.dev نیست — در حال ساخت...");
+  onProgress?.("ساخت workers.dev subdomain...");
   for (let i = 0; i < 5; i++) {
     const sub = "bpb" + randomString("abcdefghijklmnopqrstuvwxyz0123456789", 6, 8);
     const putRes = await fetch(`${CF_API}/accounts/${accountId}/workers/subdomain`, {
@@ -77,9 +79,7 @@ async function getOrCreateWorkersSubdomain(token, accountId, onProgress) {
       body: JSON.stringify({ subdomain: sub }),
     });
     const putData = await putRes.json();
-    if (putData.success && putData.result?.subdomain) {
-      return putData.result.subdomain;
-    }
+    if (putData.success && putData.result?.subdomain) return putData.result.subdomain;
   }
   throw new Error("ساخت workers.dev subdomain ناموفق بود");
 }
@@ -91,7 +91,9 @@ async function createKVNamespace(token, accountId, title) {
   };
   for (let attempt = 0; attempt < 6; attempt++) {
     const uniqueTitle =
-      attempt === 0 ? title : `${title}-${Date.now().toString(36)}-${randomString("abcdefghijklmnopqrstuvwxyz0123456789", 4, 6)}`;
+      attempt === 0
+        ? title
+        : `${title}-${Date.now().toString(36)}-${randomString("abcdefghijklmnopqrstuvwxyz0123456789", 4, 6)}`;
     const res = await fetch(`${CF_API}/accounts/${accountId}/storage/kv/namespaces`, {
       method: "POST",
       headers,
@@ -100,33 +102,43 @@ async function createKVNamespace(token, accountId, title) {
     const data = await res.json();
     if (data.success && data.result?.id) return data.result.id;
     const msg = data.errors?.[0]?.message || "";
-    if (!/already exists/i.test(msg) && attempt === 0) {
-      // try unique titles
-      continue;
-    }
-    if (!/already exists/i.test(msg)) {
+    if (!/already exists/i.test(msg) && attempt > 0) {
       throw new Error("ساخت KV ناموفق: " + (msg || JSON.stringify(data.errors || data)));
     }
   }
   throw new Error("ساخت KV ناموفق بعد از چند تلاش");
 }
 
-async function fetchWorkerScript() {
-  const res = await fetch(WORKER_JS_URL, {
-    headers: { "User-Agent": "BPB-Wizard/2.0" },
+async function getWorkerMigrationTag(token, accountId, scriptName) {
+  try {
+    const res = await fetch(`${CF_API}/accounts/${accountId}/workers/scripts`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.success || !Array.isArray(data.result)) return null;
+    const entry = data.result.find((s) => s?.id === scriptName);
+    const tag = entry?.migration_tag;
+    return typeof tag === "string" && tag.trim() ? tag.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchText(url) {
+  const res = await fetch(url, {
+    headers: { "User-Agent": "BPB-Wizard-MHD/2.1" },
     redirect: "follow",
   });
-  if (!res.ok) throw new Error(`دانلود worker.js از ریلیز رسمی ناموفق (${res.status})`);
+  if (!res.ok) throw new Error(`دانلود ناموفق ${url} (${res.status})`);
   const text = await res.text();
-  if (!text || text.length < 1000) throw new Error("فایل worker.js ناقص است");
+  if (!text || text.length < 1000) throw new Error("فایل worker ناقص است");
   return text;
 }
 
 function buildEmbeddedScript(raw, settings) {
-  const settingsJSON = JSON.stringify(settings);
   const ts = new Date().toISOString();
-  // same pattern as official BPB-Wizard web buildScript
-  return `// ${settings.accEmail}\n// Build: ${ts}\n// @ts-nocheck\nconst EMBEDED_SETTINGS = ${settingsJSON};\n${raw}`;
+  return `// ${settings.accEmail}\n// Build: ${ts}\n// @ts-nocheck\nconst EMBEDED_SETTINGS = ${JSON.stringify(settings)};\n${raw}`;
 }
 
 export async function deployWorker(
@@ -139,15 +151,18 @@ export async function deployWorker(
 ) {
   onProgress?.("دریافت workers.dev subdomain...");
   const cfSub = await getOrCreateWorkersSubdomain(token, accountId, onProgress);
-  // official mainDomain is name.subdomain without extra .workers.dev duplication when subdomain already includes it
-  // API returns just the label e.g. "mhdlab"; full host is name.mhdlab.workers.dev
   const mainDomain = `${workerName}.${cfSub}.workers.dev`;
 
   onProgress?.("ساخت KV Namespace...");
   const kvId = await createKVNamespace(token, accountId, `bpb-${workerName}`);
 
-  onProgress?.("دانلود آخرین worker.js از ریلیز رسمی BPB...");
-  let raw = await fetchWorkerScript();
+  const wantObf = !!options.obfuscate;
+  onProgress?.(
+    wantObf
+      ? "دانلود worker.full.js از ریلیز MHDLabs (برای jasaz)..."
+      : "دانلود worker.js از ریلیز MHDLabs (با TWP)..."
+  );
+  const raw = await fetchText(wantObf ? WORKER_FULL_URL : WORKER_MIN_URL);
 
   const pathCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   const passCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@$&*_-+;:,.";
@@ -170,14 +185,25 @@ export async function deployWorker(
     mainDomain,
   };
 
-  onProgress?.("تزریق EMBEDED_SETTINGS (مثل BPB-Wizard رسمی)...");
+  onProgress?.("تزریق EMBEDED_SETTINGS...");
   let script = buildEmbeddedScript(raw, settings);
+  let obfuscated = false;
 
-  if (options.obfuscate) {
-    onProgress?.("مبهم‌سازی jasaz...");
-    script = obfuscateWorkerCode(script);
-    if (!script || script.length < 1000) {
-      throw new Error("خروجی مبهم‌سازی نامعتبر است");
+  if (wantObf) {
+    onProgress?.("مبهم‌سازی jasaz (واقعی)...");
+    try {
+      const obf = obfuscateWorkerCode(script);
+      if (obf && obf.length > 1000 && obf.includes("func_dec") && obf.includes("WebProxySession")) {
+        script = obf;
+        obfuscated = true;
+        onProgress?.("مبهم‌سازی jasaz موفق بود");
+      } else {
+        onProgress?.("خروجی obfuscate نامعتبر — ادامه بدون obfuscate");
+        script = buildEmbeddedScript(await fetchText(WORKER_MIN_URL), settings);
+      }
+    } catch (e) {
+      onProgress?.("خطای obfuscate: " + (e.message || e) + " — ادامه بدون obfuscate");
+      script = buildEmbeddedScript(await fetchText(WORKER_MIN_URL), settings);
     }
   }
 
@@ -191,19 +217,37 @@ export async function deployWorker(
     } catch (_) {}
   }
 
+  onProgress?.("آماده‌سازی metadata (kv + Durable Object TWP)...");
+  const existingTag = await getWorkerMigrationTag(token, accountId, workerName);
   const metadata = {
     main_module: "worker.js",
     compatibility_date: new Date().toISOString().split("T")[0],
     compatibility_flags: ["nodejs_compat"],
-    bindings: [{ type: "kv_namespace", name: "kv", namespace_id: kvId }],
+    bindings: [
+      { type: "kv_namespace", name: "kv", namespace_id: kvId },
+      {
+        type: "durable_object_namespace",
+        name: "SESSIONS",
+        class_name: "WebProxySession",
+      },
+    ],
+    keep_bindings: ["secret_text"],
   };
+  if (!existingTag) {
+    metadata.migrations = {
+      new_tag: TWP_MIGRATION_TAG,
+      new_sqlite_classes: ["WebProxySession"],
+    };
+  } else {
+    metadata.migrations = { old_tag: existingTag, new_tag: existingTag };
+  }
 
-  async function upload(scriptBody) {
+  async function upload(body) {
     const form = new FormData();
     form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
     form.append(
       "worker.js",
-      new Blob([scriptBody], { type: "application/javascript+module" }),
+      new Blob([body], { type: "application/javascript+module" }),
       "worker.js"
     );
     const putRes = await fetch(
@@ -217,15 +261,14 @@ export async function deployWorker(
     return putRes.json();
   }
 
-  onProgress?.("آپلود Worker (binding: kv)...");
+  onProgress?.("آپلود Worker روی Cloudflare...");
   let putData = await upload(script);
-  if (!putData.success && options.obfuscate) {
+  if (!putData.success && obfuscated) {
     const msg = putData.errors?.[0]?.message || "";
-    if (/SyntaxError|Unexpected/i.test(msg)) {
-      onProgress?.("مبهم‌سازی jasaz با worker مینفی BPB سازگار نبود — آپلود بدون obfuscate...");
-      script = buildEmbeddedScript(raw, settings);
-      putData = await upload(script);
-    }
+    onProgress?.("آپلود obfuscate رد شد (" + msg + ") — تلاش با نسخه مینفی بدون obfuscate...");
+    script = buildEmbeddedScript(await fetchText(WORKER_MIN_URL), settings);
+    obfuscated = false;
+    putData = await upload(script);
   }
   if (!putData.success) {
     throw new Error(
@@ -234,7 +277,7 @@ export async function deployWorker(
   }
 
   onProgress?.("فعال‌سازی workers.dev...");
-  const enRes = await fetch(
+  await fetch(
     `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
     {
       method: "POST",
@@ -245,33 +288,26 @@ export async function deployWorker(
       body: JSON.stringify({ enabled: true, previews_enabled: true }),
     }
   );
-  const enData = await enRes.json().catch(() => ({}));
-  if (enData && enData.success === false) {
-    onProgress?.(
-      "هشدار: فعال‌سازی subdomain کامل نشد — " + (enData.errors?.[0]?.message || "unknown")
-    );
-  }
 
   const panelBase = `https://${mainDomain}`;
   const panelUrl = `${panelBase}/${securePath}/panel`;
   const loginUrl = `${panelBase}/${securePath}/login`;
 
-  // light probe
-  onProgress?.("بررسی دسترسی صفحه ورود...");
+  onProgress?.("بررسی صفحه ورود...");
   let probeOk = false;
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 5; i++) {
     try {
       const pr = await fetch(loginUrl, {
         method: "GET",
         redirect: "manual",
-        headers: { "User-Agent": "BPB-Wizard-Probe/2.0" },
+        headers: { "User-Agent": "BPB-Wizard-Probe/2.1" },
       });
       if (pr.status >= 200 && pr.status < 500) {
         probeOk = true;
         break;
       }
     } catch (_) {}
-    await new Promise((r) => setTimeout(r, 800));
+    await new Promise((r) => setTimeout(r, 700));
   }
 
   return {
@@ -282,6 +318,7 @@ export async function deployWorker(
     email: accountEmail,
     securePath,
     probeOk,
+    obfuscated,
   };
 }
 
@@ -290,7 +327,7 @@ export async function probeWorker(url) {
     const res = await fetch(url, {
       method: "GET",
       redirect: "manual",
-      headers: { "User-Agent": "BPB-Wizard-Probe/2.0" },
+      headers: { "User-Agent": "BPB-Wizard-Probe/2.1" },
     });
     return { ok: res.status >= 200 && res.status < 500, status: res.status };
   } catch (e) {
