@@ -10,8 +10,8 @@ import { obfuscateWorkerCode } from "./obfuscate.js";
 const CF_API = "https://api.cloudflare.com/client/v4";
 const WORKER_MIN_URL =
   "https://github.com/MHDLabs/BPB-Worker-Panel/releases/latest/download/worker.js";
-const WORKER_FULL_URL =
-  "https://github.com/MHDLabs/BPB-Worker-Panel/releases/latest/download/worker.full.js";
+const WORKER_OBF_URL =
+  "https://github.com/MHDLabs/BPB-Worker-Panel/releases/latest/download/worker.obf.js";
 const TWP_MIGRATION_TAG = "v1-twp";
 
 export async function verifyToken(token) {
@@ -159,10 +159,10 @@ export async function deployWorker(
   const wantObf = !!options.obfuscate;
   onProgress?.(
     wantObf
-      ? "دانلود worker.full.js از ریلیز MHDLabs (برای jasaz)..."
+      ? "دانلود worker.obf.js از ریلیز MHDLabs (پیش‌مبهم‌سازی jasaz)..."
       : "دانلود worker.js از ریلیز MHDLabs (با TWP)..."
   );
-  const raw = await fetchText(wantObf ? WORKER_FULL_URL : WORKER_MIN_URL);
+  const raw = await fetchText(wantObf ? WORKER_OBF_URL : WORKER_MIN_URL);
 
   const pathCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   const passCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@$&*_-+;:,.";
@@ -187,25 +187,8 @@ export async function deployWorker(
 
   onProgress?.("تزریق EMBEDED_SETTINGS...");
   let script = buildEmbeddedScript(raw, settings);
-  let obfuscated = false;
-
-  if (wantObf) {
-    onProgress?.("مبهم‌سازی jasaz (واقعی)...");
-    try {
-      const obf = obfuscateWorkerCode(script);
-      if (obf && obf.length > 1000 && obf.includes("func_dec") && obf.includes("WebProxySession")) {
-        script = obf;
-        obfuscated = true;
-        onProgress?.("مبهم‌سازی jasaz موفق بود");
-      } else {
-        onProgress?.("خروجی obfuscate نامعتبر — ادامه بدون obfuscate");
-        script = buildEmbeddedScript(await fetchText(WORKER_MIN_URL), settings);
-      }
-    } catch (e) {
-      onProgress?.("خطای obfuscate: " + (e.message || e) + " — ادامه بدون obfuscate");
-      script = buildEmbeddedScript(await fetchText(WORKER_MIN_URL), settings);
-    }
-  }
+  let obfuscated = wantObf && raw.includes("func_dec");
+  if (obfuscated) onProgress?.("کد از پیش با jasaz مبهم شده است");
 
   if (options.force) {
     onProgress?.("حذف Worker قبلی (force)...");

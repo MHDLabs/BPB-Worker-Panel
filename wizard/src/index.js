@@ -72,7 +72,7 @@ function streamDeploy(request, url) {
         return;
       }
 
-      await send({ type: "info", message: "بررسی Token..." });
+      await send({ type: "info", message: "بررسی Token... [MHD-v2.1]" });
       await verifyToken(token);
 
       await send({ type: "info", message: "دریافت اطلاعات اکانت..." });
