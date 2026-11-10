@@ -118,7 +118,7 @@
 
     <section class="glass">
       <form id="form" novalidate>
-        <a class="token-btn" id="token-link" href="#" target="_blank" rel="noopener">دریافت Token با دسترسی‌های لازم</a>
+        <a class="token-btn" id="token-link" href="https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&amp;accountId=%2A&amp;zoneId=all&amp;name=BPB-Wizard" target="_blank" rel="noopener">دریافت Token با دسترسی‌های لازم</a>
         <div class="field">
           <label for="token">Cloudflare API Token</label>
           <input id="token" type="password" placeholder="Token را وارد کنید" autocomplete="off" spellcheck="false">
@@ -182,21 +182,10 @@
     const historyEl = $("history");
     const resultCard = $("result");
 
-    // official BPB-Wizard token permissions
-    const perms = [
-      { key: "workers_scripts", type: "edit" },
-      { key: "workers_kv_storage", type: "edit" },
-      { key: "page", type: "edit" },
-      { key: "dns", type: "edit" },
-      { key: "user_details", type: "read" }
-    ];
-    const tokenUrl = "https://dash.cloudflare.com/profile/api-tokens?" + new URLSearchParams({
-      permissionGroupKeys: JSON.stringify(perms),
-      accountId: "*",
-      zoneId: "all",
-      name: "BPB-Wizard"
-    }).toString();
-    $("token-link").href = tokenUrl;
+    // Official BPB-Wizard token template (compact JSON, same as upstream Go BuildTokenURL)
+    const tokenUrl = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=BPB-Wizard";
+    const tokenLink = $("token-link");
+    if (tokenLink) tokenLink.href = tokenUrl;
 
     if (localStorage.getItem(KEY_TOKEN)) tokenInput.value = localStorage.getItem(KEY_TOKEN);
 
