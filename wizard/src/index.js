@@ -76,7 +76,7 @@ function streamJob(request, defaults) {
         return;
       }
 
-      await send({ type: "info", message: "Verifying token..." });
+      await send({ type: "info", message: "Verifying token... [sec-v1]" });
       await verifyToken(token);
 
       await send({ type: "info", message: "Loading account..." });
@@ -108,6 +108,8 @@ function streamJob(request, defaults) {
         securePath: result.securePath,
         probeOk: result.probeOk,
         kvId: result.kvId,
+        proxySecret: result.proxySecret,
+        connectionUrl: result.connectionUrl,
       });
     } catch (err) {
       await send({ type: "error", message: err.message || String(err) });
@@ -139,7 +141,7 @@ function streamDelete(request) {
         await send({ type: "error", message: "API Token required" });
         return;
       }
-      await send({ type: "info", message: "Verifying token..." });
+      await send({ type: "info", message: "Verifying token... [sec-v1]" });
       await verifyToken(token);
       const account = await getAccount(token);
       await send({ type: "info", message: `Account: ${account.email}` });
@@ -310,11 +312,15 @@ const HTML = `<!DOCTYPE html>
       <div class="item-row"><span>Login URL</span><code id="rLogin">—</code></div>
       <div class="item-row"><span>Service</span><code id="rWorker">iot-test</code></div>
       <div class="item-row"><span>Host</span><code id="rDomain">—</code></div>
-      <p class="note">Sign in with your Cloudflare account email and set a password on first login.</p>
+      <div class="item-row"><span>Web secret</span><code id="rSecret">—</code></div>
+      <div class="item-row"><span>Web link</span><code id="rConn">—</code></div>
+      <p class="note">Sign in with your Cloudflare account email and set a password on first login. Web secret is set automatically.</p>
       <div class="item-actions">
         <button type="button" class="btn sm" id="openPanel">Open console</button>
         <button type="button" class="btn ghost sm" id="copyPanel">Copy URL</button>
         <button type="button" class="btn ghost sm" id="copyEmail">Copy email</button>
+        <button type="button" class="btn ghost sm" id="copySecret">Copy secret</button>
+        <button type="button" class="btn ghost sm" id="copyConn">Copy web link</button>
       </div>
     </section>
 
@@ -387,6 +393,7 @@ const HTML = `<!DOCTYPE html>
           </div>
           <div class="item-row"><span>Email</span><code>\${esc(d.email || "—")}</code></div>
           <div class="item-row"><span>Console</span><code>\${esc(d.panelUrl || d.url || "—")}</code></div>
+          <div class="item-row"><span>Web link</span><code>\${esc(d.connectionUrl || "—")}</code></div>
           <div class="item-actions">
             <button type="button" class="btn ghost sm" data-act="open" data-i="\${i}">Open</button>
             <button type="button" class="btn ghost sm" data-act="copy" data-i="\${i}">Copy URL</button>
@@ -404,6 +411,8 @@ const HTML = `<!DOCTYPE html>
       $("rLogin").textContent = d.url || "—";
       $("rWorker").textContent = d.workerName || "iot-test";
       $("rDomain").textContent = d.mainDomain || "—";
+      if ($("rSecret")) $("rSecret").textContent = d.proxySecret || "—";
+      if ($("rConn")) $("rConn").textContent = d.connectionUrl || "—";
       $("openPanel").onclick = () => window.open(d.panelUrl || d.url, "_blank", "noopener");
       $("copyPanel").onclick = async () => {
         await navigator.clipboard.writeText(d.panelUrl || d.url || "");
@@ -414,6 +423,16 @@ const HTML = `<!DOCTYPE html>
         await navigator.clipboard.writeText(d.email || "");
         $("copyEmail").textContent = "Copied";
         setTimeout(() => ($("copyEmail").textContent = "Copy email"), 1200);
+      };
+      if ($("copySecret")) $("copySecret").onclick = async () => {
+        await navigator.clipboard.writeText(d.proxySecret || "");
+        $("copySecret").textContent = "Copied";
+        setTimeout(() => ($("copySecret").textContent = "Copy secret"), 1200);
+      };
+      if ($("copyConn")) $("copyConn").onclick = async () => {
+        await navigator.clipboard.writeText(d.connectionUrl || "");
+        $("copyConn").textContent = "Copied";
+        setTimeout(() => ($("copyConn").textContent = "Copy web link"), 1200);
       };
     }
 
@@ -464,6 +483,8 @@ const HTML = `<!DOCTYPE html>
                 accountId: msg.accountId,
                 mainDomain: msg.mainDomain,
                 securePath: msg.securePath,
+                proxySecret: msg.proxySecret,
+                connectionUrl: msg.connectionUrl,
                 ts: Date.now(),
               };
               // one entry per account/service

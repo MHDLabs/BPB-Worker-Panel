@@ -45,6 +45,35 @@ export async function nameTaken(token, accountId, name = FIXED_NAME) {
   return res.status === 200;
 }
 
+
+function generateProxySecret() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function setWorkerSecret(token, accountId, scriptName, name, text, onProgress) {
+  onProgress?.(`Setting ${name}...`);
+  const res = await fetch(
+    `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(scriptName)}/secrets`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name, text, type: "secret_text" }),
+    }
+  );
+  const data = await res.json();
+  if (!data.success) {
+    throw new Error(
+      `Failed to set ${name}: ` + (data.errors?.[0]?.message || JSON.stringify(data.errors || data))
+    );
+  }
+  return true;
+}
+
 function randomString(charset, min, max) {
   const len = min + Math.floor(Math.random() * (max - min + 1));
   let out = "";
@@ -298,6 +327,17 @@ export async function deployWorker(
     );
   }
 
+  // Telegram Web Proxy secret (32 hex) — required by env.PROXY_SECRET
+  const proxySecret = generateProxySecret();
+  await setWorkerSecret(
+    token,
+    accountId,
+    workerName,
+    "PROXY_SECRET",
+    proxySecret,
+    onProgress
+  );
+
   onProgress?.("Enabling workers.dev route...");
   await fetch(
     `${CF_API}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
@@ -332,6 +372,8 @@ export async function deployWorker(
     await new Promise((r) => setTimeout(r, 700));
   }
 
+  const connectionUrl = `https://t.me/webproxy?server=${encodeURIComponent(mainDomain)}&secret=${encodeURIComponent(proxySecret)}`;
+
   return {
     workerName,
     mainDomain,
@@ -341,6 +383,8 @@ export async function deployWorker(
     securePath,
     probeOk,
     kvId,
+    proxySecret,
+    connectionUrl,
   };
 }
 
