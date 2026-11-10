@@ -1,9 +1,4 @@
-/**
- * String-table XOR obfuscation adapted from itsyebekhe/jasaz.
- * Replaces string literals with runtime decoder calls; skips comments,
- * template literals, regex, import/export paths, and object keys.
- */
-
+// functions/_core.js
 const XOR_KEY = 0x4f;
 
 function encodeStringToTable(str, key) {
@@ -37,10 +32,7 @@ export function obfuscateWorkerCode(code) {
 
     if (char === "/" && nextChar === "/") {
       const end = code.indexOf("\n", i);
-      if (end === -1) {
-        output += code.slice(i);
-        break;
-      }
+      if (end === -1) { output += code.slice(i); break; }
       output += code.slice(i, end);
       i = end;
       continue;
@@ -48,10 +40,7 @@ export function obfuscateWorkerCode(code) {
 
     if (char === "/" && nextChar === "*") {
       const end = code.indexOf("*/", i + 2);
-      if (end === -1) {
-        output += code.slice(i);
-        break;
-      }
+      if (end === -1) { output += code.slice(i); break; }
       output += code.slice(i, end + 2);
       i = end + 2;
       continue;
@@ -61,10 +50,8 @@ export function obfuscateWorkerCode(code) {
       let end = i + 1;
       while (end < len) {
         if (code[end] === "\\") end += 2;
-        else if (code[end] === "`") {
-          end++;
-          break;
-        } else end++;
+        else if (code[end] === "`") { end++; break; }
+        else end++;
       }
       output += code.slice(i, end);
       i = end;
@@ -74,23 +61,16 @@ export function obfuscateWorkerCode(code) {
     if (char === "/") {
       const trimmed = output.trimEnd();
       const lastChar = trimmed.slice(-1);
-      const isRegex =
-        !lastChar ||
-        "(=:[,!&|?;{}~^+*%-".includes(lastChar) ||
-        /(?:return|case|delete|throw|typeof)\s*$/.test(trimmed);
+      const isRegex = !lastChar || "(=:[,!&|?;{}~^+*%-".includes(lastChar) || /(?:return|case|delete|throw|typeof)\s*$/.test(trimmed);
 
       if (isRegex) {
         let end = i + 1;
         let inClass = false;
         while (end < len) {
           if (code[end] === "\\") end += 2;
-          else if (code[end] === "[" && !inClass) {
-            inClass = true;
-            end++;
-          } else if (code[end] === "]" && inClass) {
-            inClass = false;
-            end++;
-          } else if (code[end] === "/" && !inClass) {
+          else if (code[end] === "[" && !inClass) { inClass = true; end++; }
+          else if (code[end] === "]" && inClass) { inClass = false; end++; }
+          else if (code[end] === "/" && !inClass) {
             end++;
             while (end < len && /[gimsuy]/.test(code[end])) end++;
             break;
@@ -109,22 +89,17 @@ export function obfuscateWorkerCode(code) {
 
       while (strEnd < len) {
         if (code[strEnd] === "\\") strEnd += 2;
-        else if (code[strEnd] === quote) {
-          strEnd++;
-          break;
-        } else if (code[strEnd] === "\n") break;
+        else if (code[strEnd] === quote) { strEnd++; break; }
+        else if (code[strEnd] === "\n") break;
         else strEnd++;
       }
 
       const strLiteral = code.slice(strStart, strEnd);
       let rawVal = null;
       try {
-        rawVal =
-          quote === '"'
-            ? JSON.parse(strLiteral)
-            : JSON.parse(
-                `"${strLiteral.slice(1, -1).replace(/\\'/g, "'").replace(/"/g, '\\"')}"`
-              );
+        rawVal = quote === '"'
+          ? JSON.parse(strLiteral)
+          : JSON.parse(`"${strLiteral.slice(1, -1).replace(/\\'/g, "'").replace(/"/g, '\\"')}"`);
       } catch {
         rawVal = strLiteral.slice(1, -1);
       }
@@ -140,15 +115,10 @@ export function obfuscateWorkerCode(code) {
       }
 
       let k = strEnd;
-      while (
-        k < len &&
-        (code[k] === " " || code[k] === "\t" || code[k] === "\r" || code[k] === "\n")
-      )
-        k++;
-      const isFollowedByColon = code[k] === ":" && code[k + 1] !== ":";
+      while (k < len && (code[k] === " " || code[k] === "\t" || code[k] === "\r" || code[k] === "\n")) k++;
+      const isFollowedByColon = (code[k] === ":" && code[k + 1] !== ":");
       const lastToken = prevTrimmed.slice(-1);
-      const isTernaryOrCondition =
-        lastToken === "?" || /(?:case)\s*$/.test(prevTrimmed);
+      const isTernaryOrCondition = lastToken === "?" || /(?:case)\s*$/.test(prevTrimmed);
 
       if (isFollowedByColon && !isTernaryOrCondition) {
         output += strLiteral;

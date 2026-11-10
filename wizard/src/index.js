@@ -7,32 +7,15 @@ import {
   probeWorker,
 } from "./deploy.js";
 
-const UI_URL =
-  "https://raw.githubusercontent.com/MHDLabs/BPB-Worker-Panel/wizard/wizard/assets/index.html";
-
-let cachedHTML = null;
-let cachedAt = 0;
-
-async function getHTML() {
-  const now = Date.now();
-  if (cachedHTML && now - cachedAt < 60_000) return cachedHTML;
-  const res = await fetch(UI_URL, {
-    headers: { "User-Agent": "BPB-Wizard/1.1" },
-  });
-  if (!res.ok) throw new Error("UI fetch failed: " + res.status);
-  cachedHTML = await res.text();
-  cachedAt = now;
-  return cachedHTML;
-}
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
       return new Response(null, {
+        status: 204,
         headers: {
-          "Access-Control-Allow-Origin": url.origin,
+          "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         },
@@ -44,53 +27,30 @@ export default {
     }
 
     if (url.pathname === "/api/probe" && request.method === "POST") {
-      return jsonAction(request, async (body) => {
-        if (!body.url) throw new Error("url الزامی است");
-        return probeWorker(body.url);
-      });
-    }
-
-    if (url.pathname === "/" || url.pathname === "/index.html") {
       try {
-        if (env.ASSETS) {
-          const assetRes = await env.ASSETS.fetch(request);
-          if (assetRes.ok) return assetRes;
-        }
-        const html = await getHTML();
-        return new Response(html, {
-          headers: {
-            "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": "no-store",
-          },
-        });
-      } catch (e) {
-        return new Response("UI unavailable: " + e.message, { status: 500 });
+        const body = await request.json();
+        if (!body.url) throw new Error("url الزامی است");
+        const result = await probeWorker(body.url);
+        return Response.json({ ok: true, ...result });
+      } catch (err) {
+        return Response.json({ ok: false, error: err.message || String(err) }, { status: 400 });
       }
     }
 
-    if (env.ASSETS) {
-      return env.ASSETS.fetch(request);
+    if (url.pathname === "/" || url.pathname === "/index.html") {
+      return new Response(HTML, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      });
     }
+
     return new Response("Not found", { status: 404 });
   },
 };
 
-async function jsonAction(request, fn) {
-  try {
-    const body = await request.json();
-    const result = await fn(body);
-    return Response.json({ ok: true, ...result });
-  } catch (err) {
-    return Response.json({ ok: false, error: err.message || String(err) }, { status: 400 });
-  }
-}
-
 function streamDeploy(request, url) {
-  const origin = request.headers.get("Origin");
-  if (origin && origin !== url.origin) {
-    return new Response("Forbidden", { status: 403 });
-  }
-
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
@@ -98,34 +58,37 @@ function streamDeploy(request, url) {
 
   (async () => {
     try {
-      const body = await request.json();
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        await send({ type: "error", message: "بدنه درخواست JSON معتبر نیست" });
+        return;
+      }
+
       const token = (body.token || "").trim();
       if (!token) {
         await send({ type: "error", message: "API Token الزامی است" });
         return;
       }
 
-      await send({ type: "info", message: "در حال بررسی Token..." });
+      await send({ type: "info", message: "بررسی Token..." });
       await verifyToken(token);
 
-      await send({ type: "info", message: "در حال دریافت اطلاعات اکانت..." });
+      await send({ type: "info", message: "دریافت اطلاعات اکانت..." });
       const account = await getAccount(token);
-      if (!account.email) {
-        await send({ type: "error", message: "ایمیل اکانت Cloudflare در دسترس نیست" });
-        return;
-      }
       await send({ type: "info", message: `اکانت: ${account.email}` });
 
       let workerName = (body.name || "").trim().toLowerCase();
       if (workerName) {
         if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(workerName)) {
-          await send({ type: "error", message: "نام Worker نامعتبر است" });
+          await send({ type: "error", message: "نام Worker نامعتبر است (فقط a-z, 0-9, -)" });
           return;
         }
         if (!body.force && (await nameTaken(token, account.id, workerName))) {
           await send({
             type: "error",
-            message: `نام «${workerName}» قبلاً استفاده شده — force را فعال کنید`,
+            message: `نام «${workerName}» قبلاً استفاده شده — گزینه force را فعال کنید`,
           });
           return;
         }
@@ -145,7 +108,11 @@ function streamDeploy(request, url) {
         async (msg) => {
           await send({ type: "info", message: msg });
         },
-        { obfuscate: body.obfuscate !== false, force: !!body.force }
+        {
+          // default OFF like safer; user can enable (jasaz)
+          obfuscate: !!body.obfuscate,
+          force: !!body.force,
+        }
       );
 
       await send({
@@ -157,6 +124,7 @@ function streamDeploy(request, url) {
         accountId: account.id,
         mainDomain: result.mainDomain,
         securePath: result.securePath,
+        probeOk: result.probeOk,
       });
     } catch (err) {
       await send({ type: "error", message: err.message || String(err) });
@@ -167,9 +135,410 @@ function streamDeploy(request, url) {
 
   return new Response(readable, {
     headers: {
-      "Content-Type": "application/x-ndjson",
-      "Access-Control-Allow-Origin": url.origin,
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
       "Cache-Control": "no-store",
     },
   });
 }
+
+// HTML injected below
+const HTML = `<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>BPB Panel Deployer</title>
+  <style>
+    :root {
+      --bg: #070b14;
+      --card: rgba(18, 24, 40, 0.72);
+      --border: rgba(148, 163, 184, 0.14);
+      --text: #e8eefc;
+      --muted: #94a3b8;
+      --accent: #5b8cff;
+      --accent2: #22d3ee;
+      --ok: #22c55e;
+      --err: #fb7185;
+      --term: #4ade80;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; font-family: Vazirmatn, Tahoma, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    body {
+      background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(91,140,255,0.18), transparent 60%),
+        radial-gradient(900px 500px at 100% 0%, rgba(34,211,238,0.12), transparent 55%),
+        var(--bg);
+    }
+    main { width: min(720px, 92vw); margin: 0 auto; padding: 2rem 0 3rem; }
+    .hero { text-align: center; margin-bottom: 1.4rem; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 0.45rem;
+      padding: 0.35rem 0.75rem; border-radius: 999px;
+      border: 1px solid var(--border); background: rgba(255,255,255,0.03);
+      color: var(--muted); font-size: 0.82rem; margin-bottom: 0.7rem;
+    }
+    .badge i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+    h1 { margin: 0 0 0.35rem; font-size: 1.55rem; }
+    .sub { margin: 0; color: var(--muted); font-size: 0.95rem; }
+    .repo { display: inline-block; margin-top: 0.55rem; color: var(--accent2); text-decoration: none; font-size: 0.85rem; }
+    .glass {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 18px; padding: 1.1rem 1.15rem; margin-bottom: 1rem;
+      backdrop-filter: blur(12px);
+    }
+    .token-btn {
+      display: flex; align-items: center; justify-content: center; gap: 0.45rem;
+      width: 100%; margin-bottom: 0.9rem; padding: 0.7rem 0.9rem;
+      border-radius: 12px; border: 1px solid rgba(91,140,255,0.35);
+      background: linear-gradient(135deg, rgba(91,140,255,0.15), rgba(34,211,238,0.08));
+      color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.92rem;
+    }
+    .field { margin-bottom: 0.8rem; position: relative; }
+    label { display: block; margin-bottom: 0.35rem; color: var(--muted); font-size: 0.86rem; }
+    input[type="password"], input[type="text"] {
+      width: 100%; padding: 0.7rem 0.85rem; border-radius: 12px;
+      border: 1px solid var(--border); background: rgba(0,0,0,0.28); color: var(--text);
+      outline: none; font-size: 0.95rem;
+    }
+    input:focus { border-color: rgba(91,140,255,0.55); }
+    .eye {
+      position: absolute; left: 0.55rem; bottom: 0.45rem;
+      border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 0.8rem;
+    }
+    .check { display: flex; align-items: center; gap: 0.45rem; color: var(--muted); font-size: 0.88rem; margin: 0.35rem 0; }
+    .btn {
+      width: 100%; margin-top: 0.7rem; padding: 0.8rem 1rem; border: 0; border-radius: 12px;
+      background: linear-gradient(135deg, var(--accent), #3b6ef5); color: white;
+      font-weight: 700; font-size: 0.98rem; cursor: pointer;
+    }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn.ghost {
+      width: auto; margin: 0; padding: 0.4rem 0.7rem; background: transparent;
+      border: 1px solid var(--border); color: var(--muted); font-weight: 600; font-size: 0.8rem;
+    }
+    .btn.danger { border-color: rgba(251,113,133,0.35); color: var(--err); }
+    .btn.sm { padding: 0.35rem 0.65rem; font-size: 0.78rem; width: auto; margin: 0; }
+    .term {
+      display: none; margin-top: 0.85rem; border-radius: 14px;
+      background: rgba(0,0,0,0.55); border: 1px solid rgba(34,197,94,0.2); overflow: hidden;
+    }
+    .term.visible { display: block; }
+    .term-bar { display: flex; gap: 6px; padding: 0.55rem 0.75rem; background: rgba(255,255,255,0.03); }
+    .term-bar span { width: 9px; height: 9px; border-radius: 50%; }
+    .term-bar span:nth-child(1) { background: #ff5f57; }
+    .term-bar span:nth-child(2) { background: #febc2e; }
+    .term-bar span:nth-child(3) { background: #28c840; }
+    .term-body {
+      padding: 0.65rem 0.85rem 0.9rem; font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.8rem; line-height: 1.65; max-height: 240px; overflow: auto; color: var(--term);
+    }
+    .term-body .err { color: var(--err); }
+    .term-body div::before { content: "> "; opacity: 0.45; }
+    .history-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.7rem; font-weight: 700; }
+    .item {
+      border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem; margin-bottom: 0.55rem;
+      background: rgba(255,255,255,0.02);
+    }
+    .item-top { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.4rem; }
+    .muted { color: var(--muted); font-size: 0.8rem; }
+    .item-row { display: flex; justify-content: space-between; gap: 0.6rem; font-size: 0.82rem; margin: 0.25rem 0; }
+    .item-row code { color: var(--accent2); font-size: 0.78rem; word-break: break-all; text-align: left; direction: ltr; }
+    .item-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.55rem; }
+    .empty { color: var(--muted); font-size: 0.88rem; text-align: center; padding: 0.8rem; }
+    .hint { color: var(--muted); font-size: 0.8rem; text-align: center; margin: 0.8rem 0 0; }
+    .hidden { display: none !important; }
+    #result .item-row { margin: 0.4rem 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="hero">
+      <div class="badge"><i></i> BPB Panel One-Click Deploy</div>
+      <h1>دیپلوی خودکار پنل BPB</h1>
+      <p class="sub">مطابق BPB-Wizard رسمی · مبهم‌سازی اختیاری jasaz</p>
+      <a class="repo" href="https://github.com/bia-pain-bache/BPB-Worker-Panel" target="_blank" rel="noopener">مخزن اصلی BPB-Worker-Panel</a>
+    </div>
+
+    <section class="glass">
+      <form id="form" novalidate>
+        <a class="token-btn" id="token-link" href="#" target="_blank" rel="noopener">دریافت Token با دسترسی‌های لازم</a>
+        <div class="field">
+          <label for="token">Cloudflare API Token</label>
+          <input id="token" type="password" placeholder="Token را وارد کنید" autocomplete="off" spellcheck="false">
+          <button type="button" class="eye" id="toggle-token">نمایش</button>
+        </div>
+        <div class="field">
+          <label for="name">نام Worker (اختیاری — خالی = تصادفی)</label>
+          <input id="name" type="text" placeholder="مثلاً bpb-my-panel" autocomplete="off">
+        </div>
+        <label class="check"><input type="checkbox" id="force"> جایگزینی Worker هم‌نام (force)</label>
+        <label class="check"><input type="checkbox" id="obfuscate"> مبهم‌سازی jasaz (اختیاری)</label>
+        <button class="btn" type="submit" id="btn">شروع دیپلوی</button>
+      </form>
+
+      <div class="term" id="term">
+        <div class="term-bar"><span></span><span></span><span></span></div>
+        <div class="term-body" id="log"></div>
+      </div>
+    </section>
+
+    <section class="glass hidden" id="result">
+      <div class="history-title"><span>نتیجه دیپلوی</span></div>
+      <div class="item-row"><span>ایمیل لاگین</span><code id="rEmail">—</code></div>
+      <div class="item-row"><span>لینک پنل</span><code id="rPanel">—</code></div>
+      <div class="item-row"><span>لینک ورود</span><code id="rLogin">—</code></div>
+      <div class="item-row"><span>Worker</span><code id="rWorker">—</code></div>
+      <div class="item-row"><span>دامنه</span><code id="rDomain">—</code></div>
+      <p class="hint" style="text-align:right;margin:0.6rem 0">با <strong>ایمیل Cloudflare</strong> وارد شوید و در اولین ورود رمز بگذارید.</p>
+      <div class="item-actions">
+        <button type="button" class="btn sm" id="openPanel">باز کردن پنل</button>
+        <button type="button" class="btn ghost sm" id="copyPanel">کپی لینک پنل</button>
+        <button type="button" class="btn ghost sm" id="copyEmail">کپی ایمیل</button>
+      </div>
+    </section>
+
+    <section class="glass" id="history-wrap">
+      <div class="history-title">
+        <span>تاریخچه این مرورگر</span>
+        <button type="button" class="btn ghost sm" id="clear-all">پاک‌سازی</button>
+      </div>
+      <div id="history"></div>
+    </section>
+
+    <p class="hint">Token فقط در همین مرورگر ذخیره می‌شود · ویزارد v2.0</p>
+  </main>
+
+  <script>
+  (function () {
+    const KEY_DEPLOYS = "bpb-panel-deploys-v5";
+    const KEY_TOKEN = "bpb-panel-token";
+    const $ = (id) => document.getElementById(id);
+
+    const tokenInput = $("token");
+    const nameInput = $("name");
+    const forceInput = $("force");
+    const obfuscateInput = $("obfuscate");
+    const formEl = $("form");
+    const deployBtn = $("btn");
+    const logEl = $("log");
+    const termEl = $("term");
+    const historyEl = $("history");
+    const resultCard = $("result");
+
+    // official BPB-Wizard token permissions
+    const perms = [
+      { key: "workers_scripts", type: "edit" },
+      { key: "workers_kv_storage", type: "edit" },
+      { key: "page", type: "edit" },
+      { key: "dns", type: "edit" },
+      { key: "user_details", type: "read" }
+    ];
+    const tokenUrl = "https://dash.cloudflare.com/profile/api-tokens?" + new URLSearchParams({
+      permissionGroupKeys: JSON.stringify(perms),
+      accountId: "*",
+      zoneId: "all",
+      name: "BPB-Wizard"
+    }).toString();
+    $("token-link").href = tokenUrl;
+
+    if (localStorage.getItem(KEY_TOKEN)) tokenInput.value = localStorage.getItem(KEY_TOKEN);
+
+    function loadDeploys() {
+      try { return JSON.parse(localStorage.getItem(KEY_DEPLOYS) || "[]"); } catch { return []; }
+    }
+    function saveDeploys(list) {
+      localStorage.setItem(KEY_DEPLOYS, JSON.stringify(list.slice(0, 40)));
+    }
+    function fmtTime(ts) {
+      try { return new Date(ts).toLocaleString("fa-IR"); } catch { return ""; }
+    }
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+      );
+    }
+    function showTerm() {
+      termEl.classList.add("visible");
+    }
+    function logLine(msg, isErr) {
+      showTerm();
+      const line = document.createElement("div");
+      if (isErr) line.className = "err";
+      line.textContent = msg;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function renderHistory() {
+      const list = loadDeploys();
+      if (!list.length) {
+        historyEl.innerHTML = '<div class="empty">هنوز دیپلویی ذخیره نشده</div>';
+        return;
+      }
+      historyEl.innerHTML = list.map((d, i) => \`
+        <div class="item">
+          <div class="item-top">
+            <strong>\${esc(d.workerName || "worker")}</strong>
+            <span class="muted">\${esc(fmtTime(d.ts))}</span>
+          </div>
+          <div class="item-row"><span>ایمیل</span><code>\${esc(d.email || "—")}</code></div>
+          <div class="item-row"><span>پنل</span><code>\${esc(d.panelUrl || d.url || "—")}</code></div>
+          <div class="item-actions">
+            <button type="button" class="btn ghost sm" data-act="open" data-i="\${i}">باز کردن</button>
+            <button type="button" class="btn ghost sm" data-act="copy" data-i="\${i}">کپی لینک</button>
+            <button type="button" class="btn danger sm" data-act="forget" data-i="\${i}">حذف از تاریخچه</button>
+          </div>
+        </div>\`).join("");
+    }
+
+    function showResult(d) {
+      resultCard.classList.remove("hidden");
+      $("rEmail").textContent = d.email || "—";
+      $("rPanel").textContent = d.panelUrl || "—";
+      $("rLogin").textContent = d.url || "—";
+      $("rWorker").textContent = d.workerName || "—";
+      $("rDomain").textContent = d.mainDomain || "—";
+      $("openPanel").onclick = () => window.open(d.panelUrl || d.url, "_blank", "noopener");
+      $("copyPanel").onclick = async () => {
+        await navigator.clipboard.writeText(d.panelUrl || d.url || "");
+        $("copyPanel").textContent = "کپی شد";
+        setTimeout(() => ($("copyPanel").textContent = "کپی لینک پنل"), 1200);
+      };
+      $("copyEmail").onclick = async () => {
+        await navigator.clipboard.writeText(d.email || "");
+        $("copyEmail").textContent = "کپی شد";
+        setTimeout(() => ($("copyEmail").textContent = "کپی ایمیل"), 1200);
+      };
+    }
+
+    historyEl.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-act]");
+      if (!btn) return;
+      const list = loadDeploys();
+      const d = list[Number(btn.dataset.i)];
+      if (!d) return;
+      const act = btn.dataset.act;
+      if (act === "open") window.open(d.panelUrl || d.url, "_blank", "noopener");
+      else if (act === "copy") {
+        await navigator.clipboard.writeText(d.panelUrl || d.url || "");
+        btn.textContent = "کپی شد";
+        setTimeout(() => (btn.textContent = "کپی لینک"), 1200);
+      } else if (act === "forget") {
+        list.splice(Number(btn.dataset.i), 1);
+        saveDeploys(list);
+        renderHistory();
+      }
+    });
+
+    $("clear-all").addEventListener("click", () => {
+      if (confirm("تاریخچه محلی پاک شود؟ (ورکرها روی Cloudflare حذف نمی‌شوند)")) {
+        localStorage.removeItem(KEY_DEPLOYS);
+        renderHistory();
+      }
+    });
+
+    $("toggle-token").addEventListener("click", () => {
+      const show = tokenInput.type === "password";
+      tokenInput.type = show ? "text" : "password";
+      $("toggle-token").textContent = show ? "پنهان" : "نمایش";
+    });
+
+    formEl.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+
+      const t = (tokenInput.value || "").trim();
+      if (!t) {
+        alert("API Token را وارد کنید");
+        tokenInput.focus();
+        return;
+      }
+      const nameVal = (nameInput.value || "").trim().toLowerCase();
+      if (nameVal && !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(nameVal)) {
+        alert("نام Worker نامعتبر است (فقط a-z و 0-9 و -)");
+        nameInput.focus();
+        return;
+      }
+
+      localStorage.setItem(KEY_TOKEN, t);
+      deployBtn.disabled = true;
+      deployBtn.textContent = "در حال دیپلوی...";
+      logEl.innerHTML = "";
+      showTerm();
+      resultCard.classList.add("hidden");
+      logLine("شروع...");
+
+      try {
+        const res = await fetch("/api/deploy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: t,
+            name: nameVal,
+            force: !!forceInput.checked,
+            obfuscate: !!obfuscateInput.checked
+          })
+        });
+
+        const ct = (res.headers.get("content-type") || "").toLowerCase();
+        if (!res.ok || !ct.includes("ndjson")) {
+          const text = await res.text();
+          throw new Error(text || ("خطای سرور: " + res.status));
+        }
+
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split("\\n");
+          buf = lines.pop() || "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let msg;
+            try { msg = JSON.parse(line); } catch {
+              logLine(line, true);
+              continue;
+            }
+            if (msg.type === "info") logLine(msg.message);
+            else if (msg.type === "error") logLine(msg.message, true);
+            else if (msg.type === "complete") {
+              logLine(msg.probeOk === false
+                ? "دیپلوی انجام شد (بررسی صفحه ورود قطعی نبود — چند ثانیه بعد امتحان کنید)"
+                : "✓ دیپلوی کامل شد");
+              const entry = {
+                workerName: msg.workerName,
+                url: msg.url,
+                panelUrl: msg.panelUrl,
+                email: msg.email,
+                accountId: msg.accountId,
+                mainDomain: msg.mainDomain,
+                securePath: msg.securePath,
+                ts: Date.now()
+              };
+              const list = loadDeploys();
+              list.unshift(entry);
+              saveDeploys(list);
+              renderHistory();
+              showResult(entry);
+            }
+          }
+        }
+      } catch (err) {
+        logLine(err.message || String(err), true);
+      } finally {
+        deployBtn.disabled = false;
+        deployBtn.textContent = "شروع دیپلوی";
+      }
+    });
+
+    renderHistory();
+  })();
+  </script>
+</body>
+</html>
+`;
